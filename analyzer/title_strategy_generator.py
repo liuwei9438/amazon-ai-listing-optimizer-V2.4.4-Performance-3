@@ -297,6 +297,7 @@ class TitleStrategyGenerator:
 
         allowed_types = {
             "IDENTITY",
+            "SECONDARY_IDENTITY",
             "MODEL",
             "PART_NUMBER",
             "COMPATIBILITY",
@@ -756,16 +757,11 @@ class TitleStrategyGenerator:
             # =========================================
             # Group 1
             #
-            # 其他 required 候选
-            #
-            # 例如：
-            # compatibility
-            # model
-            # part number
-            # 关键规格
+            # Compatibility brand is protected ahead
+            # of optional secondary identity/context.
             # =========================================
 
-            elif required:
+            elif candidate_type == "COMPATIBILITY":
 
                 group = 1
 
@@ -773,12 +769,70 @@ class TitleStrategyGenerator:
             # =========================================
             # Group 2
             #
-            # 可选候选
+            # AI-selected primary model / part number.
+            # Strategy marks only the strongest 1-2 as
+            # required when their selection value is high.
+            # =========================================
+
+            elif (
+                candidate_type
+                in {
+                    "MODEL",
+                    "PART_NUMBER",
+                }
+                and
+                required
+            ):
+
+                group = 2
+
+
+            # =========================================
+            # Group 3
+            #
+            # Other high-value supporting information.
+            #
+            # SECONDARY_IDENTITY is deliberately NOT
+            # protected. It competes here by adjusted
+            # incremental value and character efficiency.
+            # This prevents a long/redundant secondary
+            # identity from displacing compatibility or
+            # primary models.
+            # =========================================
+
+            elif candidate_type not in {
+                "MODEL",
+                "PART_NUMBER",
+                "SEARCH_TERM",
+            }:
+
+                group = 3
+
+
+            # =========================================
+            # Group 4
+            #
+            # Completion models / part numbers.
+            # Used after stronger supporting facts.
+            # =========================================
+
+            elif candidate_type in {
+                "MODEL",
+                "PART_NUMBER",
+            }:
+
+                group = 4
+
+
+            # =========================================
+            # Group 5
+            #
+            # Remaining search/context completion.
             # =========================================
 
             else:
 
-                group = 2
+                group = 5
 
 
             return (
@@ -808,6 +862,6 @@ class TitleStrategyGenerator:
 
         result[
             "schema_version"
-        ] = "2.8-title-strategy-incremental-value"
+        ] = "2.9-value-protected-title-allocation"
 
         return result
