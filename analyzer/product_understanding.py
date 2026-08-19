@@ -337,34 +337,89 @@ class ProductUnderstandingEngine:
 
 
 
+        # =====================================================
+        # V1.2 Identifier Candidate Protection
+        #
+        # Root cause fixed here:
+        # The second-stage IdentifierClassifier previously received only
+        # compatibility.models / compatibility.part_numbers produced by the
+        # first AI understanding pass. If that pass omitted a source-supported
+        # model (for example a long compatibility model list), the classifier
+        # never had a chance to recover it and downstream Knowledge received
+        # models=[].
+        #
+        # The deterministic Fact Lock already extracts source-supported
+        # identifier candidates from the complete source. Merge those
+        # candidates into the classifier input, then let IdentifierClassifier
+        # decide their semantic role. This preserves Fact Protection:
+        # - Fact Lock supplies only values present in SOURCE.
+        # - IdentifierClassifier still decides model / part / spec / quantity.
+        # - Nothing is inserted directly into compatibility without
+        #   classification.
+        # =====================================================
+
+        fact_lock = build_fact_lock(
+            record
+        )
+
         candidates = []
 
-
         candidates.extend(
-
             compatibility.get(
-
                 "models",
-
                 []
-
             )
-
         )
-
 
         candidates.extend(
-
             compatibility.get(
-
                 "part_numbers",
-
                 []
-
             )
-
         )
 
+        candidates.extend(
+            fact_lock.get(
+                "compatible_models",
+                []
+            )
+        )
+
+        candidates.extend(
+            fact_lock.get(
+                "part_numbers",
+                []
+            )
+        )
+
+        # Stable case-insensitive de-duplication. Keep first appearance so
+        # source / AI ordering remains deterministic.
+        unique_candidates = []
+        seen_candidates = set()
+
+        for value in candidates:
+
+            value = str(
+                value or ""
+            ).strip()
+
+            if not value:
+                continue
+
+            key = value.casefold()
+
+            if key in seen_candidates:
+                continue
+
+            seen_candidates.add(
+                key
+            )
+
+            unique_candidates.append(
+                value
+            )
+
+        candidates = unique_candidates
 
 
         if not candidates:
@@ -503,12 +558,24 @@ class ProductUnderstandingEngine:
 
         if model_values:
 
-            compatibility["models"] = model_values
+            compatibility["models"] = list(
+                dict.fromkeys(
+                    value
+                    for value in model_values
+                    if value
+                )
+            )
 
 
         if part_values:
 
-            compatibility["part_numbers"] = part_values
+            compatibility["part_numbers"] = list(
+                dict.fromkeys(
+                    value
+                    for value in part_values
+                    if value
+                )
+            )
 
 
 
