@@ -21,6 +21,16 @@ from services.task_manager import get_task_dir, save_status
 DEFAULT_MAX_WORKERS = 4
 MAX_ALLOWED_WORKERS = 8
 
+# Whole-product recovery layer.
+#
+# AI Runtime already retries an individual API request.  This additional
+# layer retries the complete one-product pipeline only when that product
+# produced no success profile.  It protects the batch against transient
+# JSON/schema/storage/network failures that escape a single stage.
+DEFAULT_PRODUCT_MAX_ATTEMPTS = 2
+MAX_PRODUCT_MAX_ATTEMPTS = 3
+PRODUCT_RETRY_DELAY_SECONDS = 0.8
+
 
 def _resolve_max_workers(options: dict | None) -> int:
     raw = options.get("max_workers") if isinstance(options, dict) else None
@@ -33,65 +43,140 @@ def _resolve_max_workers(options: dict | None) -> int:
     return max(1, min(workers, MAX_ALLOWED_WORKERS))
 
 
-def _child_task_id(task_id: str, index: int) -> str:
-    return f"{task_id}/workers/item_{index:05d}"
+def _resolve_product_max_attempts(options: dict | None) -> int:
+    raw = (
+        options.get("product_max_attempts")
+        if isinstance(options, dict)
+        else None
+    )
+    if raw in (None, ""):
+        raw = DEFAULT_PRODUCT_MAX_ATTEMPTS
+    try:
+        attempts = int(raw)
+    except (TypeError, ValueError):
+        attempts = DEFAULT_PRODUCT_MAX_ATTEMPTS
+    return max(1, min(attempts, MAX_PRODUCT_MAX_ATTEMPTS))
+
+
+def _child_task_id(task_id: str, index: int, attempt: int = 1) -> str:
+    return f"{task_id}/workers/item_{index:05d}/attempt_{attempt:02d}"
 
 
 def _run_one_record(*, record, index, parent_task_id, api_key, model, options):
-    """Reuse the stable one-product pipeline in an isolated child directory."""
-    child_id = _child_task_id(parent_task_id, index)
-    save_control(child_id, "running")
+    """Run one product with an explicit terminal-outcome guarantee.
+
+    Each product receives a small whole-pipeline retry budget.  A retry is
+    used only when the previous attempt produced no success profile.  This is
+    intentionally above the per-API retry layer: malformed AI JSON, transient
+    schema output, child-result read/write issues, or an escaped stage error
+    can otherwise cause an otherwise valid product to fail the whole pipeline.
+
+    The function always returns exactly one terminal result:
+    - profile != None  -> success
+    - failed != None   -> explicit failure
+    It never silently returns an unresolved item.
+    """
     started = time.time()
     context_tokens = set_api_context(parent_task_id, index)
-    try:
-        process_batch([record], child_id, api_key, model, options)
-        profiles = load_profiles(child_id)
-        failed_items = load_failed_items(child_id)
-        profile = profiles[0] if profiles else None
-        failed = failed_items[0] if failed_items else None
+    max_attempts = _resolve_product_max_attempts(options)
 
-        if profile is None and failed is None:
-            failed = {
+    last_failed = None
+
+    try:
+        for attempt in range(1, max_attempts + 1):
+            child_id = _child_task_id(parent_task_id, index, attempt)
+            save_control(child_id, "running")
+
+            try:
+                process_batch([record], child_id, api_key, model, options)
+
+                profiles = load_profiles(child_id)
+                failed_items = load_failed_items(child_id)
+
+                profile = profiles[0] if profiles else None
+                failed = failed_items[0] if failed_items else None
+
+                if profile is not None:
+                    return {
+                        "index": index,
+                        "profile": profile,
+                        "failed": None,
+                        "attempts": attempt,
+                        "recovered_after_retry": attempt > 1,
+                        "elapsed": round(time.time() - started, 2),
+                    }
+
+                if failed is None:
+                    failed = {
+                        "index": index,
+                        "source_row_index": getattr(record, "row_number", None),
+                        "sku": getattr(record, "sku", ""),
+                        "title": getattr(record, "title", ""),
+                        "error": "并发子任务结束但没有产生成功或失败结果",
+                        "error_type": "unresolved_concurrent_item",
+                    }
+
+                if isinstance(failed, dict):
+                    failed = dict(failed)
+                    failed["index"] = index
+                    failed["source_row_index"] = getattr(
+                        record, "row_number", None
+                    )
+                    failed["attempt"] = attempt
+                    failed["max_attempts"] = max_attempts
+
+                last_failed = failed
+
+            except Exception as exc:
+                last_failed = {
+                    "index": index,
+                    "source_row_index": getattr(record, "row_number", None),
+                    "sku": getattr(record, "sku", ""),
+                    "title": getattr(record, "title", ""),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                }
+
+            finally:
+                _cleanup_child(parent_task_id, index, attempt)
+
+            # Retry only after a complete product attempt failed.
+            if attempt < max_attempts:
+                time.sleep(PRODUCT_RETRY_DELAY_SECONDS)
+
+        if not isinstance(last_failed, dict):
+            last_failed = {
                 "index": index,
                 "source_row_index": getattr(record, "row_number", None),
                 "sku": getattr(record, "sku", ""),
                 "title": getattr(record, "title", ""),
-                "error": "并发子任务结束但没有产生成功或失败结果",
-                "error_type": "unresolved_concurrent_item",
+                "error": "商品在所有并发重试后仍未产生终态结果",
+                "error_type": "unresolved_after_product_retry",
             }
 
-        if isinstance(failed, dict):
-            failed["index"] = index
-            failed["source_row_index"] = getattr(record, "row_number", None)
+        last_failed = dict(last_failed)
+        last_failed["attempts"] = max_attempts
+        last_failed["product_retry_exhausted"] = True
 
-        return {
-            "index": index,
-            "profile": profile,
-            "failed": failed,
-            "elapsed": round(time.time() - started, 2),
-        }
-    except Exception as exc:
         return {
             "index": index,
             "profile": None,
-            "failed": {
-                "index": index,
-                "source_row_index": getattr(record, "row_number", None),
-                "sku": getattr(record, "sku", ""),
-                "title": getattr(record, "title", ""),
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            },
+            "failed": last_failed,
+            "attempts": max_attempts,
+            "recovered_after_retry": False,
             "elapsed": round(time.time() - started, 2),
         }
+
     finally:
         reset_api_context(context_tokens)
 
 
-def _cleanup_child(parent_task_id: str, index: int):
+def _cleanup_child(parent_task_id: str, index: int, attempt: int = 1):
     try:
         shutil.rmtree(
-            get_task_dir(_child_task_id(parent_task_id, index)),
+            get_task_dir(_child_task_id(parent_task_id, index, attempt)),
             ignore_errors=True,
         )
     except OSError:
@@ -222,14 +307,48 @@ def process_batch_concurrent(
 
             for future in done:
                 index = futures.pop(future)
-                result = future.result()
+
+                try:
+                    result = future.result()
+                except Exception as future_exc:
+                    # Last-resort parent-side guard.  Even a catastrophic
+                    # Future exception becomes an explicit failed terminal
+                    # result instead of disappearing from the batch.
+                    record = records[index]
+                    result = {
+                        "index": index,
+                        "profile": None,
+                        "failed": {
+                            "index": index,
+                            "source_row_index": getattr(
+                                record, "row_number", None
+                            ),
+                            "sku": getattr(record, "sku", ""),
+                            "title": getattr(record, "title", ""),
+                            "error": str(future_exc),
+                            "error_type": type(future_exc).__name__,
+                            "future_exception": True,
+                        },
+                    }
+
                 if result.get("profile") is not None:
                     profiles_by_index[index] = result["profile"]
                     failed_by_index.pop(index, None)
                 else:
-                    failed_by_index[index] = result["failed"]
-                _cleanup_child(task_id, index)
-
+                    failed = result.get("failed")
+                    if not isinstance(failed, dict):
+                        record = records[index]
+                        failed = {
+                            "index": index,
+                            "source_row_index": getattr(
+                                record, "row_number", None
+                            ),
+                            "sku": getattr(record, "sku", ""),
+                            "title": getattr(record, "title", ""),
+                            "error": "Future完成但未返回有效成功或失败结果",
+                            "error_type": "invalid_future_terminal_result",
+                        }
+                    failed_by_index[index] = failed
             ordered_profiles, ordered_failed = persist_parent_results()
             completed = len(ordered_profiles) + len(ordered_failed)
 
