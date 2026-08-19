@@ -593,6 +593,36 @@ class TitleGenerator:
 
 
             return False
+        def is_single_unit_quantity(
+            text,
+        ):
+            """
+            Single-unit package quantity normally has no title value.
+
+            Examples conceptually covered:
+            1 pc / 1 pcs / 1 piece / 1 pieces / 1 pack / 1 set / 1 count
+
+            This check is intentionally narrow. It does not treat technical
+            specifications such as 1V, 1mm, 1L, 1kg, model "1", etc. as
+            package quantity.
+            """
+
+            value = normalize_text(
+                text
+            ).lower()
+
+            if not value:
+                return False
+
+            return bool(
+                re.fullmatch(
+                    r"1\s*(?:pc|pcs|piece|pieces|pack|packs|set|sets|count|counts|ct|unit|units)",
+                    value,
+                    flags=re.IGNORECASE,
+                )
+            )
+
+
         # =================================================
         # 7. Package Quantity Fixed Prefix
         #
@@ -662,7 +692,13 @@ class TitleGenerator:
                 )
             )
 
-            if quantity_text:
+            if (
+                quantity_text
+                and
+                not is_single_unit_quantity(
+                    quantity_text
+                )
+            ):
 
                 title_parts.append(
                     quantity_text
@@ -1208,7 +1244,7 @@ class TitleGenerator:
             # =============================================
 
             "generator_version":
-                "V3.2-title-completion",
+                "V3.3-value-protected-completion",
 
             "budget_parts":
                 title_parts,
