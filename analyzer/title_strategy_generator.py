@@ -655,353 +655,355 @@ class TitleStrategyGenerator:
         model: str,
     ) -> dict:
         """
-        V3.2:
-        Deterministic validator first; targeted AI repair only for the
-        minority of cases whose protected core still exceeds 75 chars.
+        V3.3 Exact Character Budget + Two-Pass Targeted Repair.
 
-        The repair call is intentionally narrow:
-        - it cannot change quantity
-        - it cannot change models / part numbers
-        - it can only propose a shorter IDENTITY and/or a shorter
-          COMPATIBILITY phrase
-        - deterministic guards verify that the proposal does not invent
-          new identity words or new compatible brands
+        Root-cause behavior:
+        - normal products make NO extra AI request
+        - overflow products receive an exact numeric character target
+        - pass 1 attempts a safe targeted repair
+        - if still >75, pass 2 recalculates the remaining shortage and
+          gives AI a tighter exact budget
+        - at most 2 repair calls
+        - quantity / model / part number are never rewritten here
         """
 
-        if not isinstance(
-            result,
-            dict,
-        ):
+        if not isinstance(result, dict):
             return result
 
-        required_budget = result.get(
-            "required_budget",
-            {},
-        )
-
-        if not isinstance(
-            required_budget,
-            dict,
-        ):
+        required_budget = result.get("required_budget", {})
+        if not isinstance(required_budget, dict):
             required_budget = {}
+            result["required_budget"] = required_budget
 
-        current_length = (
-            TitleStrategyGenerator
-            ._protected_bundle_length(
-                result
+        def _protected():
+            return (
+                TitleStrategyGenerator
+                ._current_protected_candidates(result)
             )
-        )
 
-        required_budget[
-            "protected_bundle_length"
-        ] = current_length
-
-        required_budget[
-            "resolved"
-        ] = current_length <= 75
-
-        overflow_type = (
-            TitleStrategyGenerator
-            ._classify_core_overflow(
-                result
+        def _bundle_length():
+            return (
+                TitleStrategyGenerator
+                ._protected_bundle_length(result)
             )
+
+        def _candidate_of_type(type_name: str):
+            for candidate in result.get("title_candidates", []):
+                if (
+                    isinstance(candidate, dict)
+                    and bool(candidate.get("required", False))
+                    and str(candidate.get("type", "") or "").upper()
+                    == type_name
+                ):
+                    return candidate
+            return None
+
+        def _models():
+            return [
+                candidate
+                for candidate in result.get("title_candidates", [])
+                if (
+                    isinstance(candidate, dict)
+                    and bool(candidate.get("required", False))
+                    and str(candidate.get("type", "") or "").upper()
+                    in {"MODEL", "PART_NUMBER"}
+                )
+            ]
+
+        def _quantities():
+            return [
+                candidate
+                for candidate in result.get("title_candidates", [])
+                if (
+                    isinstance(candidate, dict)
+                    and bool(candidate.get("required", False))
+                    and str(candidate.get("type", "") or "").upper()
+                    == "QUANTITY"
+                )
+            ]
+
+        def _max_chars_for(candidate_to_replace: dict | None) -> int:
+            """
+            Exact maximum characters available to one protected candidate
+            if every other protected item remains at its current shortest
+            safe representation.
+            """
+            if not isinstance(candidate_to_replace, dict):
+                return 0
+
+            other_parts = []
+
+            for candidate in _protected():
+                if candidate is candidate_to_replace:
+                    continue
+
+                part = (
+                    TitleStrategyGenerator
+                    ._candidate_shortest_text(candidate)
+                )
+
+                if part:
+                    other_parts.append(part)
+
+            if not other_parts:
+                return 75
+
+            # One separating space will be needed between the replacement
+            # candidate and the already-protected remainder.
+            return max(
+                0,
+                75
+                -
+                len(" ".join(other_parts))
+                -
+                1,
+            )
+
+        def _refresh_diagnostics():
+            current = _bundle_length()
+
+            required_budget[
+                "protected_bundle_length"
+            ] = current
+
+            required_budget[
+                "resolved"
+            ] = current <= 75
+
+            required_budget[
+                "overflow_type"
+            ] = (
+                TitleStrategyGenerator
+                ._classify_core_overflow(result)
+            )
+
+            required_budget[
+                "characters_over_budget"
+            ] = max(0, current - 75)
+
+            return current
+
+        current_length = _refresh_diagnostics()
+
+        required_budget.setdefault(
+            "repair_attempted",
+            False,
         )
-
+        required_budget.setdefault(
+            "repair_applied",
+            False,
+        )
+        required_budget.setdefault(
+            "repair_type",
+            "",
+        )
+        required_budget.setdefault(
+            "repair_reason",
+            "",
+        )
         required_budget[
-            "overflow_type"
-        ] = overflow_type
+            "repair_passes"
+        ] = 0
+        required_budget[
+            "repair_history"
+        ] = []
 
-        result[
-            "required_budget"
-        ] = required_budget
-
-        # Fast path: the normal 75-char case makes no extra AI request.
+        # Fast path — normal products never pay for another AI call.
         if current_length <= 75:
-
-            required_budget[
-                "repair_attempted"
-            ] = False
-
-            required_budget[
-                "repair_applied"
-            ] = False
-
-            required_budget[
-                "repair_type"
-            ] = ""
-
-            required_budget[
-                "repair_reason"
-            ] = ""
-
             return result
 
+        identity = _candidate_of_type("IDENTITY")
+        compatibility = _candidate_of_type("COMPATIBILITY")
 
-        candidates = result.get(
-            "title_candidates",
-            [],
+        original_identity_short = (
+            str(identity.get("short_text", "") or "").strip()
+            if identity
+            else ""
+        )
+        original_compatibility_short = (
+            str(compatibility.get("short_text", "") or "").strip()
+            if compatibility
+            else ""
         )
 
-        if not isinstance(
-            candidates,
-            list,
-        ):
-            return result
+        any_safe_change = False
+        applied_identity = False
+        applied_compatibility = False
+        last_reason = ""
 
-        identity = next(
-            (
-                candidate
-                for candidate in candidates
-                if isinstance(
-                    candidate,
-                    dict,
-                )
-                and
-                str(
-                    candidate.get(
-                        "type",
-                        "",
-                    )
-                    or
-                    ""
-                ).upper()
-                ==
-                "IDENTITY"
-                and
-                bool(
-                    candidate.get(
-                        "required",
-                        False,
-                    )
-                )
-            ),
-            None,
-        )
+        for repair_pass in (1, 2):
 
-        compatibility = next(
-            (
-                candidate
-                for candidate in candidates
-                if isinstance(
-                    candidate,
-                    dict,
-                )
-                and
-                str(
-                    candidate.get(
-                        "type",
-                        "",
-                    )
-                    or
-                    ""
-                ).upper()
-                ==
-                "COMPATIBILITY"
-                and
-                bool(
-                    candidate.get(
-                        "required",
-                        False,
-                    )
-                )
-            ),
-            None,
-        )
+            current_length = _refresh_diagnostics()
 
-        protected_models = [
-            candidate
-            for candidate in candidates
-            if isinstance(
-                candidate,
-                dict,
+            if current_length <= 75:
+                break
+
+            identity_max_chars = (
+                _max_chars_for(identity)
+                if identity
+                else 0
             )
-            and
-            bool(
-                candidate.get(
-                    "required",
-                    False,
-                )
+
+            compatibility_max_chars = (
+                _max_chars_for(compatibility)
+                if compatibility
+                else 0
             )
-            and
-            str(
-                candidate.get(
-                    "type",
-                    "",
-                )
-                or
-                ""
-            ).upper()
-            in {
-                "MODEL",
-                "PART_NUMBER",
+
+            identity_current = (
+                TitleStrategyGenerator
+                ._candidate_shortest_text(identity)
+                if identity
+                else ""
+            )
+
+            compatibility_current = (
+                TitleStrategyGenerator
+                ._candidate_shortest_text(compatibility)
+                if compatibility
+                else ""
+            )
+
+            repair_payload = {
+                "max_title_length":
+                    75,
+
+                "repair_pass":
+                    repair_pass,
+
+                "overflow_type":
+                    required_budget.get(
+                        "overflow_type",
+                        "",
+                    ),
+
+                "current_protected_bundle_length":
+                    current_length,
+
+                "characters_that_must_be_removed":
+                    max(
+                        0,
+                        current_length - 75,
+                    ),
+
+                "identity":
+                    {
+                        "full_text":
+                            (
+                                str(
+                                    identity.get(
+                                        "text",
+                                        "",
+                                    )
+                                    or
+                                    ""
+                                ).strip()
+                                if identity
+                                else
+                                ""
+                            ),
+                        "current_effective_text":
+                            identity_current,
+                        "maximum_allowed_characters":
+                            identity_max_chars,
+                    },
+
+                "compatibility":
+                    {
+                        "full_text":
+                            (
+                                str(
+                                    compatibility.get(
+                                        "text",
+                                        "",
+                                    )
+                                    or
+                                    ""
+                                ).strip()
+                                if compatibility
+                                else
+                                ""
+                            ),
+                        "current_effective_text":
+                            compatibility_current,
+                        "maximum_allowed_characters":
+                            compatibility_max_chars,
+                    },
+
+                "protected_models_and_part_numbers":
+                    [
+                        str(
+                            candidate.get(
+                                "text",
+                                "",
+                            )
+                            or
+                            ""
+                        ).strip()
+                        for candidate in _models()
+                    ],
+
+                "protected_quantity":
+                    [
+                        str(
+                            candidate.get(
+                                "text",
+                                "",
+                            )
+                            or
+                            ""
+                        ).strip()
+                        for candidate in _quantities()
+                    ],
             }
-        ]
 
-        protected_quantities = [
-            candidate
-            for candidate in candidates
-            if isinstance(
-                candidate,
-                dict,
-            )
-            and
-            bool(
-                candidate.get(
-                    "required",
-                    False,
-                )
-            )
-            and
-            str(
-                candidate.get(
-                    "type",
-                    "",
-                )
-                or
-                ""
-            ).upper()
-            ==
-            "QUANTITY"
-        ]
-
-        repair_payload = {
-            "max_title_length":
-                75,
-
-            "overflow_type":
-                overflow_type,
-
-            "current_protected_bundle_length":
-                current_length,
-
-            "identity":
-                {
-                    "text":
-                        (
-                            str(
-                                identity.get(
-                                    "text",
-                                    "",
-                                )
-                                or
-                                ""
-                            ).strip()
-                            if identity
-                            else
-                            ""
-                        ),
-
-                    "current_short_text":
-                        (
-                            str(
-                                identity.get(
-                                    "short_text",
-                                    "",
-                                )
-                                or
-                                ""
-                            ).strip()
-                            if identity
-                            else
-                            ""
-                        ),
-                },
-
-            "compatibility":
-                {
-                    "text":
-                        (
-                            str(
-                                compatibility.get(
-                                    "text",
-                                    "",
-                                )
-                                or
-                                ""
-                            ).strip()
-                            if compatibility
-                            else
-                            ""
-                        ),
-
-                    "current_short_text":
-                        (
-                            str(
-                                compatibility.get(
-                                    "short_text",
-                                    "",
-                                )
-                                or
-                                ""
-                            ).strip()
-                            if compatibility
-                            else
-                            ""
-                        ),
-                },
-
-            "protected_models_and_part_numbers":
-                [
-                    str(
-                        candidate.get(
-                            "text",
-                            "",
-                        )
-                        or
-                        ""
-                    ).strip()
-                    for candidate
-                    in protected_models
-                ],
-
-            "protected_quantity":
-                [
-                    str(
-                        candidate.get(
-                            "text",
-                            "",
-                        )
-                        or
-                        ""
-                    ).strip()
-                    for candidate
-                    in protected_quantities
-                ],
-        }
-
-        repair_prompt = """
+            repair_prompt = """
 You are repairing ONLY an Amazon title protected-core overflow.
 
 Do not write a complete title.
 Do not reinterpret the product.
 Do not invent facts.
 
+HARD REQUIREMENT:
 The protected bundle must fit within 75 characters including spaces.
 
-You may ONLY do these two things:
+The user payload gives:
+- current_protected_bundle_length
+- characters_that_must_be_removed
+- maximum_allowed_characters for IDENTITY
+- maximum_allowed_characters for COMPATIBILITY
 
-1. IDENTITY compression:
-   - Keep the same physical product type.
+These are REAL character limits, not suggestions.
+
+You may ONLY do the following:
+
+1. IDENTITY compression
+   - Preserve the same physical product type.
    - Remove only redundant generic context, duplicated nouns,
-     or non-essential modifiers.
-   - Do not replace the identity with a broader category.
-   - Do not remove the product-defining head noun.
-   - Prefer deleting words already present in the full identity;
-     do not invent a new product name.
+     overlapping descriptors, or non-essential modifiers.
+   - Never replace the identity with a broader category.
+   - Never remove the product-defining head noun.
+   - Prefer words already present in the full identity.
+   - If you return identity_short_text, its character count MUST be
+     <= identity.maximum_allowed_characters.
 
-2. COMPATIBILITY compression:
-   - Keep the exact phrase prefix "Compatible with".
-   - When a long list of compatible brands is the cause of overflow,
-     retain only the highest-value compatible brand(s) needed for title
-     search/selection and move the omitted compatible brands outside title.
-   - Every retained brand must already appear in the original
-     compatibility phrase.
-   - Do not invent compatibility.
+2. COMPATIBILITY compression
+   - Keep the exact prefix "Compatible with".
+   - If a long multi-brand phrase causes overflow, retain only the
+     highest-value brand(s) needed in the title.
+   - Every retained brand must already occur in the original phrase.
+   - Never invent compatibility.
+   - If you return compatibility_short_text, its character count MUST be
+     <= compatibility.maximum_allowed_characters.
 
 Never change:
 - quantity
 - model numbers
 - part numbers
+
+IMPORTANT:
+A proposal that is shorter but still leaves the protected bundle above
+75 characters is NOT a successful repair.
 
 Return JSON only:
 
@@ -1013,305 +1015,307 @@ Return JSON only:
   "reason": ""
 }
 
-If no semantically safe repair exists, return safe=false and repair_type="none".
+If no semantically safe expression can satisfy the supplied numeric
+budget, return safe=false and repair_type="none".
 """
 
-        def _repair_once():
-            return client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role":
-                            "system",
-                        "content":
-                            repair_prompt,
+            def _repair_once():
+                return client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role":
+                                "system",
+                            "content":
+                                repair_prompt,
+                        },
+                        {
+                            "role":
+                                "user",
+                            "content":
+                                json.dumps(
+                                    repair_payload,
+                                    ensure_ascii=False,
+                                    indent=2,
+                                ),
+                        },
+                    ],
+                    response_format={
+                        "type":
+                            "json_object"
                     },
+                )
+
+            required_budget[
+                "repair_attempted"
+            ] = True
+            required_budget[
+                "repair_passes"
+            ] = repair_pass
+
+            try:
+                repair_response = execute_with_retry(
+                    _repair_once,
+                    stage=(
+                        "title_strategy_core_repair_"
+                        f"pass_{repair_pass}"
+                    ),
+                )
+
+                repair_result = json.loads(
+                    repair_response
+                    .choices[0]
+                    .message
+                    .content
+                )
+
+            except Exception as exc:
+                last_reason = (
+                    f"repair_pass_{repair_pass}_call_failed: {exc}"
+                )
+
+                required_budget[
+                    "repair_history"
+                ].append(
                     {
-                        "role":
-                            "user",
-                        "content":
-                            json.dumps(
-                                repair_payload,
-                                ensure_ascii=False,
-                                indent=2,
-                            ),
-                    },
-                ],
-                response_format={
-                    "type":
-                        "json_object"
-                },
+                        "pass":
+                            repair_pass,
+                        "before_length":
+                            current_length,
+                        "applied":
+                            False,
+                        "reason":
+                            last_reason,
+                    }
+                )
+                continue
+
+            if not isinstance(repair_result, dict):
+                last_reason = (
+                    f"repair_pass_{repair_pass}_result_not_dict"
+                )
+
+                required_budget[
+                    "repair_history"
+                ].append(
+                    {
+                        "pass":
+                            repair_pass,
+                        "before_length":
+                            current_length,
+                        "applied":
+                            False,
+                        "reason":
+                            last_reason,
+                    }
+                )
+                continue
+
+            if not bool(repair_result.get("safe", False)):
+                last_reason = str(
+                    repair_result.get(
+                        "reason",
+                        f"repair_pass_{repair_pass}_no_safe_repair",
+                    )
+                    or
+                    f"repair_pass_{repair_pass}_no_safe_repair"
+                )
+
+                required_budget[
+                    "repair_history"
+                ].append(
+                    {
+                        "pass":
+                            repair_pass,
+                        "before_length":
+                            current_length,
+                        "applied":
+                            False,
+                        "reason":
+                            last_reason,
+                    }
+                )
+                continue
+
+            identity_short = str(
+                repair_result.get(
+                    "identity_short_text",
+                    "",
+                )
+                or
+                ""
+            ).strip()
+
+            compatibility_short = str(
+                repair_result.get(
+                    "compatibility_short_text",
+                    "",
+                )
+                or
+                ""
+            ).strip()
+
+            pass_identity_applied = False
+            pass_compatibility_applied = False
+
+            if (
+                identity
+                and
+                identity_short
+                and
+                len(identity_short) <= identity_max_chars
+                and
+                TitleStrategyGenerator
+                ._identity_short_is_structurally_safe(
+                    str(
+                        identity.get(
+                            "text",
+                            "",
+                        )
+                        or
+                        ""
+                    ),
+                    identity_short,
+                )
+            ):
+                identity[
+                    "short_text"
+                ] = identity_short
+                pass_identity_applied = True
+                applied_identity = True
+                any_safe_change = True
+
+            if (
+                compatibility
+                and
+                compatibility_short
+                and
+                len(compatibility_short)
+                <= compatibility_max_chars
+                and
+                TitleStrategyGenerator
+                ._compatibility_short_is_structurally_safe(
+                    str(
+                        compatibility.get(
+                            "text",
+                            "",
+                        )
+                        or
+                        ""
+                    ),
+                    compatibility_short,
+                )
+            ):
+                compatibility[
+                    "short_text"
+                ] = compatibility_short
+                pass_compatibility_applied = True
+                applied_compatibility = True
+                any_safe_change = True
+
+            after_length = _refresh_diagnostics()
+
+            required_budget[
+                "repair_history"
+            ].append(
+                {
+                    "pass":
+                        repair_pass,
+                    "before_length":
+                        current_length,
+                    "after_length":
+                        after_length,
+                    "characters_removed":
+                        max(
+                            0,
+                            current_length - after_length,
+                        ),
+                    "identity_max_chars":
+                        identity_max_chars,
+                    "compatibility_max_chars":
+                        compatibility_max_chars,
+                    "identity_applied":
+                        pass_identity_applied,
+                    "compatibility_applied":
+                        pass_compatibility_applied,
+                    "applied":
+                        (
+                            pass_identity_applied
+                            or
+                            pass_compatibility_applied
+                        ),
+                    "reason":
+                        str(
+                            repair_result.get(
+                                "reason",
+                                "",
+                            )
+                            or
+                            ""
+                        ),
+                }
             )
 
-        required_budget[
-            "repair_attempted"
-        ] = True
-
-        try:
-
-            repair_response = execute_with_retry(
-                _repair_once,
-                stage="title_strategy_core_repair",
+            last_reason = str(
+                repair_result.get(
+                    "reason",
+                    "",
+                )
+                or
+                ""
             )
 
-            repair_result = json.loads(
-                repair_response
-                .choices[0]
-                .message
-                .content
-            )
+            if after_length <= 75:
+                break
 
-        except Exception as exc:
+        final_length = _refresh_diagnostics()
 
+        if final_length <= 75:
             required_budget[
                 "repair_applied"
-            ] = False
+            ] = any_safe_change
 
-            required_budget[
-                "repair_type"
-            ] = ""
+            if applied_identity and applied_compatibility:
+                required_budget[
+                    "repair_type"
+                ] = "identity_and_compatibility"
+            elif applied_identity:
+                required_budget[
+                    "repair_type"
+                ] = "identity"
+            elif applied_compatibility:
+                required_budget[
+                    "repair_type"
+                ] = "compatibility"
+            else:
+                required_budget[
+                    "repair_type"
+                ] = ""
 
             required_budget[
                 "repair_reason"
             ] = (
-                f"repair_call_failed: {exc}"
+                last_reason
+                or
+                "protected_core_resolved"
             )
 
             return result
 
-
-        if not isinstance(
-            repair_result,
-            dict,
-        ):
-
-            required_budget[
-                "repair_applied"
-            ] = False
-
-            required_budget[
-                "repair_type"
-            ] = ""
-
-            required_budget[
-                "repair_reason"
-            ] = "repair_result_not_dict"
-
-            return result
-
-
-        if not bool(
-            repair_result.get(
-                "safe",
-                False,
-            )
-        ):
-
-            required_budget[
-                "repair_applied"
-            ] = False
-
-            required_budget[
-                "repair_type"
-            ] = ""
-
-            required_budget[
-                "repair_reason"
-            ] = str(
-                repair_result.get(
-                    "reason",
-                    "no_safe_repair",
-                )
-                or
-                "no_safe_repair"
-            )
-
-            return result
-
-
-        identity_short = str(
-            repair_result.get(
-                "identity_short_text",
-                "",
-            )
-            or
-            ""
-        ).strip()
-
-        compatibility_short = str(
-            repair_result.get(
-                "compatibility_short_text",
-                "",
-            )
-            or
-            ""
-        ).strip()
-
-        old_identity_short = (
-            str(
-                identity.get(
-                    "short_text",
-                    "",
-                )
-                or
-                ""
-            ).strip()
-            if identity
-            else
-            ""
-        )
-
-        old_compatibility_short = (
-            str(
-                compatibility.get(
-                    "short_text",
-                    "",
-                )
-                or
-                ""
-            ).strip()
-            if compatibility
-            else
-            ""
-        )
-
-        identity_applied = False
-        compatibility_applied = False
-
-        if (
-            identity
-            and
-            identity_short
-            and
-            TitleStrategyGenerator
-            ._identity_short_is_structurally_safe(
-                str(
-                    identity.get(
-                        "text",
-                        "",
-                    )
-                    or
-                    ""
-                ),
-                identity_short,
-            )
-        ):
-
-            identity[
-                "short_text"
-            ] = identity_short
-
-            identity_applied = True
-
-
-        if (
-            compatibility
-            and
-            compatibility_short
-            and
-            TitleStrategyGenerator
-            ._compatibility_short_is_structurally_safe(
-                str(
-                    compatibility.get(
-                        "text",
-                        "",
-                    )
-                    or
-                    ""
-                ),
-                compatibility_short,
-            )
-        ):
-
-            compatibility[
-                "short_text"
-            ] = compatibility_short
-
-            compatibility_applied = True
-
-
-        repaired_length = (
-            TitleStrategyGenerator
-            ._protected_bundle_length(
-                result
-            )
-        )
-
-        if repaired_length <= 75:
-
-            required_budget[
-                "protected_bundle_length"
-            ] = repaired_length
-
-            required_budget[
-                "resolved"
-            ] = True
-
-            required_budget[
-                "repair_applied"
-            ] = bool(
-                identity_applied
-                or
-                compatibility_applied
-            )
-
-            if (
-                identity_applied
-                and
-                compatibility_applied
-            ):
-                applied_type = (
-                    "identity_and_compatibility"
-                )
-            elif identity_applied:
-                applied_type = "identity"
-            elif compatibility_applied:
-                applied_type = "compatibility"
-            else:
-                applied_type = ""
-
-            required_budget[
-                "repair_type"
-            ] = applied_type
-
-            required_budget[
-                "repair_reason"
-            ] = str(
-                repair_result.get(
-                    "reason",
-                    "",
-                )
-                or
-                ""
-            )
-
-            return result
-
-
-        # Repair did not solve the protected bundle. Roll back any proposed
-        # short forms rather than silently changing semantics without benefit.
+        # If the two-pass process could not fully resolve the protected core,
+        # restore original short forms. This keeps failed repair attempts from
+        # silently changing product semantics or title behavior.
         if identity:
             identity[
                 "short_text"
-            ] = old_identity_short
+            ] = original_identity_short
 
         if compatibility:
             compatibility[
                 "short_text"
-            ] = old_compatibility_short
+            ] = original_compatibility_short
 
-        required_budget[
-            "protected_bundle_length"
-        ] = (
-            TitleStrategyGenerator
-            ._protected_bundle_length(
-                result
-            )
-        )
-
-        required_budget[
-            "resolved"
-        ] = False
+        final_length = _refresh_diagnostics()
 
         required_budget[
             "repair_applied"
@@ -1324,7 +1328,9 @@ If no semantically safe repair exists, return safe=false and repair_type="none".
         required_budget[
             "repair_reason"
         ] = (
-            "repair_proposal_did_not_resolve_75_char_budget"
+            last_reason
+            or
+            "two_pass_repair_did_not_resolve_75_char_budget"
         )
 
         return result
@@ -2524,6 +2530,6 @@ If no semantically safe repair exists, return safe=false and repair_type="none".
 
         result[
             "schema_version"
-        ] = "3.2-core-budget-validator-repair"
+        ] = "3.3-exact-budget-two-pass-repair"
 
         return result
