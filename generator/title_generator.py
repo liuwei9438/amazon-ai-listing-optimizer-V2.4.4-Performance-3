@@ -837,31 +837,131 @@ class TitleGenerator:
 
         identity_candidate = None
         compatibility_core = []
-        required_model_core = []
+        required_core_candidates = []
 
-        for core_candidate in candidates:
+        required_type_rank = {
+            "MODEL": 0,
+            "PART_NUMBER": 0,
+            "SPECIFICATION": 1,
+            "FEATURE": 2,
+            "MATERIAL": 3,
+            "COLOR": 4,
+        }
 
-            if not isinstance(core_candidate, dict):
+        priority_rank = {
+            "S": 0,
+            "A": 1,
+            "B": 2,
+            "C": 3,
+            "D": 4,
+        }
+
+
+        def required_core_sort_key(
+            item,
+        ):
+            index, candidate = item
+
+            candidate_type = normalize_text(
+                candidate.get(
+                    "type",
+                    "",
+                )
+            ).upper()
+
+            priority = normalize_text(
+                candidate.get(
+                    "priority",
+                    "",
+                )
+            ).upper()
+
+            try:
+                adjusted_score = float(
+                    candidate.get(
+                        "adjusted_score",
+                        candidate.get(
+                            "final_score",
+                            0,
+                        ),
+                    )
+                    or 0
+                )
+            except Exception:
+                adjusted_score = 0.0
+
+            return (
+                required_type_rank.get(
+                    candidate_type,
+                    5,
+                ),
+                priority_rank.get(
+                    priority,
+                    9,
+                ),
+                -adjusted_score,
+                index,
+            )
+
+
+        for core_index, core_candidate in enumerate(
+            candidates
+        ):
+
+            if not isinstance(
+                core_candidate,
+                dict,
+            ):
                 continue
 
             core_type = normalize_text(
-                core_candidate.get("type", "")
+                core_candidate.get(
+                    "type",
+                    "",
+                )
             ).upper()
 
-            if core_type == "IDENTITY" and identity_candidate is None:
+            if (
+                core_type == "IDENTITY"
+                and
+                identity_candidate is None
+            ):
                 identity_candidate = core_candidate
                 continue
 
             if core_type == "COMPATIBILITY":
-                compatibility_core.append(core_candidate)
+                compatibility_core.append(
+                    core_candidate
+                )
                 continue
 
             if (
-                core_type in {"MODEL", "PART_NUMBER"}
-                and bool(core_candidate.get("required", False))
-                and len(required_model_core) < 2
+                core_type != "QUANTITY"
+                and
+                bool(
+                    core_candidate.get(
+                        "required",
+                        False,
+                    )
+                )
             ):
-                required_model_core.append(core_candidate)
+                required_core_candidates.append(
+                    (
+                        core_index,
+                        core_candidate,
+                    )
+                )
+
+
+        required_core_candidates.sort(
+            key=required_core_sort_key
+        )
+
+        required_core = [
+            candidate
+            for _, candidate
+            in required_core_candidates
+        ]
 
 
         force_identity_short = False
@@ -871,7 +971,16 @@ class TitleGenerator:
             "full_identity_bundle_length": None,
             "short_identity_bundle_length": None,
             "identity_short_forced": False,
-            "protected_model_count": len(required_model_core),
+            "protected_required_count": len(required_core),
+            "protected_required_types": [
+                normalize_text(
+                    candidate.get(
+                        "type",
+                        "",
+                    )
+                ).upper()
+                for candidate in required_core
+            ],
             "resolved": True,
         }
 
@@ -888,7 +997,7 @@ class TitleGenerator:
             protected_tail = []
 
             for protected_candidate in (
-                compatibility_core + required_model_core
+                compatibility_core + required_core
             ):
                 protected_text = shortest_candidate_text(
                     protected_candidate
@@ -991,33 +1100,74 @@ class TitleGenerator:
             == "COMPATIBILITY"
         ]
 
-        protected_primary_models = []
+        protected_required = []
+
+        protected_identity_indexes = {
+            index
+            for index, _
+            in protected_identity
+        }
+
+        protected_compatibility_indexes = {
+            index
+            for index, _
+            in protected_compatibility
+        }
+
 
         for item in indexed_candidates:
 
-            candidate = item[1]
+            index, candidate = item
 
-            if not isinstance(candidate, dict):
+            if (
+                index in protected_identity_indexes
+                or
+                index in protected_compatibility_indexes
+            ):
+                continue
+
+            if not isinstance(
+                candidate,
+                dict,
+            ):
                 continue
 
             candidate_type = normalize_text(
-                candidate.get("type", "")
+                candidate.get(
+                    "type",
+                    "",
+                )
             ).upper()
 
             if (
-                candidate_type in {"MODEL", "PART_NUMBER"}
-                and bool(candidate.get("required", False))
-                and len(protected_primary_models) < 2
+                candidate_type != "QUANTITY"
+                and
+                bool(
+                    candidate.get(
+                        "required",
+                        False,
+                    )
+                )
             ):
-                protected_primary_models.append(item)
+                protected_required.append(
+                    item
+                )
+
+
+        protected_required.sort(
+            key=required_core_sort_key
+        )
 
 
         protected_indexes = {
             index
-            for index, _ in (
+            for index, _
+            in (
                 protected_identity
-                + protected_compatibility
-                + protected_primary_models
+                +
+                protected_compatibility
+                +
+                protected_required
             )
         }
 
@@ -1029,11 +1179,13 @@ class TitleGenerator:
 
         execution_candidates = (
             protected_identity
-            + protected_compatibility
-            + protected_primary_models
-            + remaining_candidates
+            +
+            protected_compatibility
+            +
+            protected_required
+            +
+            remaining_candidates
         )
-
 
         for index, candidate in execution_candidates:
 
@@ -1148,14 +1300,6 @@ class TitleGenerator:
                 protected_core_unresolved
                 and
                 not required
-                and
-                candidate_type
-                not in {
-                    "IDENTITY",
-                    "COMPATIBILITY",
-                    "MODEL",
-                    "PART_NUMBER",
-                }
             ):
 
                 rejected_candidates.append(
@@ -1602,7 +1746,7 @@ class TitleGenerator:
             # =============================================
 
             "generator_version":
-                "V3.5-protected-core-budget",
+                "V3.6-required-candidate-protection",
 
             "budget_parts":
                 title_parts,
