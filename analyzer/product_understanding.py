@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from services import (
@@ -49,6 +48,319 @@ class UnderstandingError(
 ):
     pass
 
+
+
+
+
+def _clean_brand_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return __import__("re").sub(
+        r"\s+",
+        " ",
+        str(value),
+    ).strip()
+
+
+def _strip_exact_brand_phrase(
+    text: Any,
+    brand: str,
+) -> str:
+    """
+    Remove a known seller/store brand as a standalone phrase.
+
+    The phrase is removed case-insensitively and separators are cleaned.
+    We do not perform fuzzy removal because that could damage legitimate
+    model numbers or compatibility brands.
+    """
+
+    source = _clean_brand_text(text)
+    brand = _clean_brand_text(brand)
+
+    if not source or not brand:
+        return source
+
+    pattern = (
+        r"(?<![A-Za-z0-9])"
+        +
+        __import__("re").escape(brand)
+        +
+        r"(?![A-Za-z0-9])"
+    )
+
+    cleaned = __import__("re").sub(
+        pattern,
+        " ",
+        source,
+        flags=__import__("re").IGNORECASE,
+    )
+
+    cleaned = __import__("re").sub(
+        r"\s+",
+        " ",
+        cleaned,
+    ).strip(" -–—|,;/:")
+
+    return cleaned
+
+
+def _remove_brand_from_string_list(
+    values: Any,
+    brand: str,
+) -> list[str]:
+
+    if isinstance(values, list):
+        source_values = values
+    elif isinstance(values, (tuple, set)):
+        source_values = list(values)
+    elif values:
+        source_values = [values]
+    else:
+        source_values = []
+
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for value in source_values:
+        cleaned = _strip_exact_brand_phrase(
+            value,
+            brand,
+        )
+
+        key = cleaned.casefold()
+
+        if cleaned and key not in seen:
+            seen.add(key)
+            result.append(cleaned)
+
+    return result
+
+
+def sanitize_seller_brand_contamination(
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Deterministic seller/store-brand firewall.
+
+    Once AI has explicitly identified brand_info.seller_brand, that brand is
+    metadata only. It must not leak into compatibility or generated content.
+
+    This does NOT guess seller brands. It only acts on an explicitly detected
+    seller_brand, keeping false-positive risk low.
+    """
+
+    if not isinstance(profile, dict):
+        return profile
+
+    brand_info = profile.get(
+        "brand_info",
+        {},
+    )
+
+    if not isinstance(brand_info, dict):
+        return profile
+
+    seller_brand = _clean_brand_text(
+        brand_info.get(
+            "seller_brand",
+            "",
+        )
+    )
+
+    if not seller_brand:
+        return profile
+
+    # -----------------------------------------------------
+    # Brand arrays: seller brand cannot become compatibility
+    # -----------------------------------------------------
+    for key in (
+        "third_party_brands",
+        "detected_brands",
+    ):
+        brand_info[key] = [
+            brand
+            for brand in (
+                brand_info.get(
+                    key,
+                    [],
+                )
+                if isinstance(
+                    brand_info.get(
+                        key,
+                        [],
+                    ),
+                    list,
+                )
+                else []
+            )
+            if (
+                _clean_brand_text(brand).casefold()
+                !=
+                seller_brand.casefold()
+            )
+        ]
+
+    compatibility = profile.setdefault(
+        "compatibility",
+        {},
+    )
+
+    if isinstance(compatibility, dict):
+        compatibility["brands"] = [
+            brand
+            for brand in (
+                compatibility.get(
+                    "brands",
+                    [],
+                )
+                if isinstance(
+                    compatibility.get(
+                        "brands",
+                        [],
+                    ),
+                    list,
+                )
+                else []
+            )
+            if (
+                _clean_brand_text(brand).casefold()
+                !=
+                seller_brand.casefold()
+            )
+        ]
+
+        compatibility[
+            "compatibility_notes"
+        ] = _remove_brand_from_string_list(
+            compatibility.get(
+                "compatibility_notes",
+                [],
+            ),
+            seller_brand,
+        )
+
+    # -----------------------------------------------------
+    # Identity / source-derived semantic fields
+    # -----------------------------------------------------
+    product_identity = profile.get(
+        "product_identity",
+        {},
+    )
+
+    if isinstance(product_identity, dict):
+        for key in (
+            "name",
+            "buyer_search_identity",
+            "title_product_identity",
+            "category",
+            "parent_product",
+        ):
+            if key in product_identity:
+                product_identity[key] = (
+                    _strip_exact_brand_phrase(
+                        product_identity.get(
+                            key,
+                            "",
+                        ),
+                        seller_brand,
+                    )
+                )
+
+        for key in (
+            "context",
+            "design_features",
+            "functional_features",
+            "usage_scenarios",
+        ):
+            product_identity[key] = (
+                _remove_brand_from_string_list(
+                    product_identity.get(
+                        key,
+                        [],
+                    ),
+                    seller_brand,
+                )
+            )
+
+    basic_info = profile.get(
+        "basic_info",
+        {},
+    )
+
+    if isinstance(basic_info, dict):
+        for key in (
+            "product_name",
+            "product_type",
+            "category",
+            "main_function",
+        ):
+            if key in basic_info:
+                basic_info[key] = (
+                    _strip_exact_brand_phrase(
+                        basic_info.get(
+                            key,
+                            "",
+                        ),
+                        seller_brand,
+                    )
+                )
+
+    title_information = profile.get(
+        "title_information",
+        {},
+    )
+
+    if isinstance(title_information, dict):
+        for key in (
+            "priority_attributes",
+            "important_specifications",
+            "important_context",
+            "important_compatibility",
+        ):
+            title_information[key] = (
+                _remove_brand_from_string_list(
+                    title_information.get(
+                        key,
+                        [],
+                    ),
+                    seller_brand,
+                )
+            )
+
+    attributes = profile.get(
+        "attributes",
+        {},
+    )
+
+    if isinstance(attributes, dict):
+        for key in (
+            "functions",
+            "usage_scenarios",
+            "factual_selling_points",
+            "materials",
+            "design_features",
+            "functional_features",
+            "specifications",
+            "package_contents",
+            "installation",
+        ):
+            if key in attributes:
+                attributes[key] = (
+                    _remove_brand_from_string_list(
+                        attributes.get(
+                            key,
+                            [],
+                        ),
+                        seller_brand,
+                    )
+                )
+
+    # Keep seller_brand itself for diagnostics/auditing.
+    brand_info[
+        "seller_brand_filtered"
+    ] = True
+
+    return profile
 
 
 
@@ -133,12 +445,17 @@ class ProductUnderstandingEngine:
 
 
         # =================================================
-        # Understanding Recovery
+        # Seller / Store Brand Hygiene
+        #
+        # The source seller's own brand is metadata only.
+        # Remove it before identifier, compatibility, knowledge,
+        # title, bullet and description stages can consume it.
         # =================================================
 
-        profile = self._recover_missing_product_type(
+        profile = sanitize_seller_brand_contamination(
             profile
         )
+
 
 
         # =================================================
@@ -314,186 +631,6 @@ class ProductUnderstandingEngine:
 
 
     # =====================================================
-    # Understanding Identity Recovery
-    # =====================================================
-
-    @staticmethod
-    def _recover_missing_product_type(
-        profile: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Recover a missing basic_info.product_type from already
-        identified, source-grounded product identity fields.
-
-        Root cause:
-        the first AI understanding call can occasionally identify the
-        product correctly in product_identity / basic_info.product_name
-        while leaving basic_info.product_type empty.  The previous validator
-        treated that single blank field as a fatal product-level failure.
-
-        Recovery order intentionally uses only fields already returned by
-        the understanding stage; it does not invent a category or infer from
-        arbitrary numbers/specifications.
-        """
-
-        if not isinstance(profile, dict):
-            return profile
-
-        basic = profile.setdefault(
-            "basic_info",
-            {},
-        )
-
-        if not isinstance(basic, dict):
-            basic = {}
-            profile["basic_info"] = basic
-
-        current_type = str(
-            basic.get("product_type")
-            or ""
-        ).strip()
-
-        if current_type:
-            return profile
-
-        product_identity = profile.get(
-            "product_identity",
-            {},
-        )
-
-        if not isinstance(product_identity, dict):
-            product_identity = {}
-
-        candidates = [
-            basic.get("product_name"),
-            product_identity.get("name"),
-            product_identity.get("title_product_identity"),
-            product_identity.get("buyer_search_identity"),
-        ]
-
-        recovered = ""
-
-        for value in candidates:
-            value = str(value or "").strip()
-            if value:
-                recovered = value
-                break
-
-        if not recovered:
-            return profile
-
-        basic["product_type"] = recovered
-
-        # Keep product_name populated as well when the AI returned identity
-        # fields but omitted the mirrored basic_info name.
-        if not str(basic.get("product_name") or "").strip():
-            basic["product_name"] = recovered
-
-        profile.setdefault(
-            "understanding_recovery",
-            {},
-        )
-
-        # product_profile_schema has additionalProperties=False for the AI
-        # response, but this metadata is added only after schema parsing.  It
-        # is useful in diagnostics and ignored by downstream knowledge code.
-        profile["understanding_recovery"] = {
-            "product_type_recovered": True,
-            "recovered_product_type": recovered,
-            "source": "existing_identity_field",
-        }
-
-        return profile
-
-
-    # =====================================================
-    # Contextual Numeric Model Recovery
-    # =====================================================
-
-    @staticmethod
-    def _recover_numeric_compatibility_models(
-        title: str,
-        candidates: list[str],
-        already_models: list[str],
-    ) -> list[str]:
-        """
-        Recover source-supported bare numeric model numbers when the AI
-        classifier is overly conservative.
-
-        This is intentionally NOT "numbers = models".
-
-        Recovery requires all of the following:
-        1. The value is a bare 3-6 digit token.
-        2. It appears in the source title.
-        3. It appears inside a compatibility/model zone introduced by
-           wording such as "for", "compatible with", or "fits".
-        4. At least two such numeric candidates occur in that same zone.
-
-        This handles real compatibility lists such as:
-            "... OPC Drum for Canon iR 2520 2525 2530 2535 ..."
-        while avoiding quantities, dimensions, voltage, power, and short
-        family codes such as "34 35" that occur outside the compatibility
-        zone.
-        """
-
-        title = str(title or "").strip()
-        if not title:
-            return list(already_models or [])
-
-        lowered = title.casefold()
-
-        # Use the LAST compatibility introducer. Product names/specifications
-        # commonly appear earlier, while the fitment list normally follows it.
-        cue_matches = list(
-            re.finditer(
-                r"\b(?:compatible\s+with|fits?|for)\b",
-                lowered,
-                flags=re.IGNORECASE,
-            )
-        )
-
-        if not cue_matches:
-            return list(already_models or [])
-
-        zone_start = cue_matches[-1].end()
-        compatibility_zone = title[zone_start:]
-
-        numeric_candidates: list[str] = []
-
-        for raw in candidates:
-            value = str(raw or "").strip()
-
-            # Bare numeric device models are normally 3-6 digits.
-            # Units/quantities such as 10pcs, 60V, 30MM, 1-3cm do not match.
-            if not re.fullmatch(r"\d{3,6}", value):
-                continue
-
-            if not re.search(
-                rf"(?<!\w){re.escape(value)}(?!\w)",
-                compatibility_zone,
-                flags=re.IGNORECASE,
-            ):
-                continue
-
-            numeric_candidates.append(value)
-
-        # A single bare number remains ambiguous; let the AI classification
-        # stand. A sequence of 2+ values is strong compatibility-list evidence.
-        if len(numeric_candidates) < 2:
-            return list(already_models or [])
-
-        recovered = list(already_models or [])
-        seen = {str(x).casefold() for x in recovered if x}
-
-        for value in numeric_candidates:
-            key = value.casefold()
-            if key not in seen:
-                recovered.append(value)
-                seen.add(key)
-
-        return recovered
-
-
-    # =====================================================
     # Identifier Classification
     # =====================================================
 
@@ -525,89 +662,34 @@ class ProductUnderstandingEngine:
 
 
 
-        # =====================================================
-        # V1.2 Identifier Candidate Protection
-        #
-        # Root cause fixed here:
-        # The second-stage IdentifierClassifier previously received only
-        # compatibility.models / compatibility.part_numbers produced by the
-        # first AI understanding pass. If that pass omitted a source-supported
-        # model (for example a long compatibility model list), the classifier
-        # never had a chance to recover it and downstream Knowledge received
-        # models=[].
-        #
-        # The deterministic Fact Lock already extracts source-supported
-        # identifier candidates from the complete source. Merge those
-        # candidates into the classifier input, then let IdentifierClassifier
-        # decide their semantic role. This preserves Fact Protection:
-        # - Fact Lock supplies only values present in SOURCE.
-        # - IdentifierClassifier still decides model / part / spec / quantity.
-        # - Nothing is inserted directly into compatibility without
-        #   classification.
-        # =====================================================
-
-        fact_lock = build_fact_lock(
-            record
-        )
-
         candidates = []
 
+
         candidates.extend(
+
             compatibility.get(
+
                 "models",
+
                 []
+
             )
+
         )
 
+
         candidates.extend(
+
             compatibility.get(
+
                 "part_numbers",
+
                 []
+
             )
+
         )
 
-        candidates.extend(
-            fact_lock.get(
-                "compatible_models",
-                []
-            )
-        )
-
-        candidates.extend(
-            fact_lock.get(
-                "part_numbers",
-                []
-            )
-        )
-
-        # Stable case-insensitive de-duplication. Keep first appearance so
-        # source / AI ordering remains deterministic.
-        unique_candidates = []
-        seen_candidates = set()
-
-        for value in candidates:
-
-            value = str(
-                value or ""
-            ).strip()
-
-            if not value:
-                continue
-
-            key = value.casefold()
-
-            if key in seen_candidates:
-                continue
-
-            seen_candidates.add(
-                key
-            )
-
-            unique_candidates.append(
-                value
-            )
-
-        candidates = unique_candidates
 
 
         if not candidates:
@@ -741,49 +823,17 @@ class ProductUnderstandingEngine:
 
 
 
-        # =====================================================
-        # V1.3 Contextual Recovery
-        #
-        # Some valid device models are bare numbers. Even with the full title,
-        # the AI classifier may conservatively return them as unknown.
-        # Recover only numeric sequences that are source-supported and located
-        # inside a clear compatibility zone.
-        # =====================================================
-
-        model_values = self._recover_numeric_compatibility_models(
-            getattr(
-                record,
-                "title",
-                ""
-            ),
-            candidates,
-            model_values,
-        )
-
-
         # 保留 AI 原始结果中未被否定的信息
         # 这里只更新确认项
 
         if model_values:
 
-            compatibility["models"] = list(
-                dict.fromkeys(
-                    value
-                    for value in model_values
-                    if value
-                )
-            )
+            compatibility["models"] = model_values
 
 
         if part_values:
 
-            compatibility["part_numbers"] = list(
-                dict.fromkeys(
-                    value
-                    for value in part_values
-                    if value
-                )
-            )
+            compatibility["part_numbers"] = part_values
 
 
 
