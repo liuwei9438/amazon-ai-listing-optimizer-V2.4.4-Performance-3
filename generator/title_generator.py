@@ -593,71 +593,6 @@ class TitleGenerator:
 
 
             return False
-        def compact_quantity_text(
-            text,
-        ):
-            """
-            Normalize explicit package counts into the shortest stable form.
-
-            Examples:
-            10 Pieces -> 10pcs
-            5 pieces  -> 5pcs
-            3 PCS     -> 3pcs
-            2 pc      -> 2pcs
-
-            Only package-count units are normalized. Technical units and
-            specifications are left untouched.
-            """
-
-            value = normalize_text(
-                text
-            )
-
-            if not value:
-                return ""
-
-            match = re.fullmatch(
-                r"(\d+)\s*(?:pc|pcs|piece|pieces|unit|units|count|counts|ct)",
-                value,
-                flags=re.IGNORECASE,
-            )
-
-            if not match:
-                return value
-
-            return f"{int(match.group(1))}pcs"
-
-
-        def is_single_unit_quantity(
-            text,
-        ):
-            """
-            Single-unit package quantity normally has no title value.
-
-            Examples conceptually covered:
-            1 pc / 1 pcs / 1 piece / 1 pieces / 1 pack / 1 set / 1 count
-
-            This check is intentionally narrow. It does not treat technical
-            specifications such as 1V, 1mm, 1L, 1kg, model "1", etc. as
-            package quantity.
-            """
-
-            value = normalize_text(
-                text
-            ).lower()
-
-            if not value:
-                return False
-
-            return bool(
-                re.fullmatch(
-                    r"1\s*(?:pc|pcs|piece|pieces|pack|packs|set|sets|count|counts|ct|unit|units)",
-                    value,
-                    flags=re.IGNORECASE,
-                )
-            )
-
-
         # =================================================
         # 7. Package Quantity Fixed Prefix
         #
@@ -710,39 +645,49 @@ class TitleGenerator:
             if not quantity_text:
                 continue
 
+            # =================================================
+            # V3.7.2 Single-unit Quantity Guard
+            #
+            # A quantity of 1 must NEVER consume title space.
+            # Handles noisy AI/source forms such as:
+            #   1pc / 1 pcs / 1 piece / 1x / 1x package quantity
+            #
+            # Multi-unit quantities remain fixed prefixes.
+            # =================================================
+
+            quantity_match = __import__("re").match(
+                r"^\s*(\d+)\s*(?:x|pc|pcs|piece|pieces)?\b",
+                quantity_text,
+                flags=__import__("re").IGNORECASE,
+            )
+
+            if quantity_match:
+                try:
+                    quantity_value = int(quantity_match.group(1))
+                except (TypeError, ValueError):
+                    quantity_value = None
+
+                if quantity_value == 1:
+                    continue
+
 
             quantity_candidate = candidate
             quantity_index = index
 
-            # 正常情况下只允许一个 QUANTITY Candidate
+            # 正常情况下只允许一个有效的 QUANTITY Candidate
             break
 
 
         if quantity_candidate is not None:
 
-            quantity_text = compact_quantity_text(
-                normalize_text(
-                    quantity_candidate.get(
-                        "short_text",
-                        "",
-                    )
-                )
-                or
-                normalize_text(
-                    quantity_candidate.get(
-                        "text",
-                        "",
-                    )
+            quantity_text = normalize_text(
+                quantity_candidate.get(
+                    "text",
+                    "",
                 )
             )
 
-            if (
-                quantity_text
-                and
-                not is_single_unit_quantity(
-                    quantity_text
-                )
-            ):
+            if quantity_text:
 
                 title_parts.append(
                     quantity_text
@@ -794,726 +739,20 @@ class TitleGenerator:
                     }
                 )
         # =================================================
-        # 7.5 Protected Core Bundle Planner
+        # 7. 逐个执行 title_candidates
         #
-        # Generator never invents a shorter identity.
-        # It may only choose Strategy-provided IDENTITY.short_text.
+        # 极其重要：
         #
-        # Protected core:
-        #   Quantity (>1) + Identity + Compatibility
-        #   + first 1-2 required MODEL/PART_NUMBER candidates.
+        # 不排序。
+        #
+        # Strategy已经按标题价值排序。
+        #
+        # Generator只执行这个顺序。
         # =================================================
 
-        def joined_length(
-            parts,
-        ):
-            return len(
-                " ".join(
-                    normalize_text(part)
-                    for part in parts
-                    if normalize_text(part)
-                )
-            )
-
-
-        def shortest_candidate_text(
-            candidate,
-        ):
-            if not isinstance(candidate, dict):
-                return ""
-
-            full_text = normalize_text(
-                candidate.get("text", "")
-            )
-            short_text = normalize_text(
-                candidate.get("short_text", "")
-            )
-
-            if short_text and len(short_text) < len(full_text):
-                return short_text
-
-            return full_text
-
-
-        identity_candidate = None
-        compatibility_core = []
-        required_core_candidates = []
-
-        required_type_rank = {
-            "MODEL": 0,
-            "PART_NUMBER": 0,
-            "SPECIFICATION": 1,
-            "FEATURE": 2,
-            "MATERIAL": 3,
-            "COLOR": 4,
-        }
-
-        priority_rank = {
-            "S": 0,
-            "A": 1,
-            "B": 2,
-            "C": 3,
-            "D": 4,
-        }
-
-
-        def required_core_sort_key(
-            item,
-        ):
-            index, candidate = item
-
-            candidate_type = normalize_text(
-                candidate.get(
-                    "type",
-                    "",
-                )
-            ).upper()
-
-            priority = normalize_text(
-                candidate.get(
-                    "priority",
-                    "",
-                )
-            ).upper()
-
-            try:
-                adjusted_score = float(
-                    candidate.get(
-                        "adjusted_score",
-                        candidate.get(
-                            "final_score",
-                            0,
-                        ),
-                    )
-                    or 0
-                )
-            except Exception:
-                adjusted_score = 0.0
-
-            return (
-                required_type_rank.get(
-                    candidate_type,
-                    5,
-                ),
-                priority_rank.get(
-                    priority,
-                    9,
-                ),
-                -adjusted_score,
-                index,
-            )
-
-
-        def optional_value_metrics(
-            candidate,
-        ):
-            """
-            Generic value model for OPTIONAL title candidates.
-
-            No product-specific or candidate-type hardcoding is used here.
-            Strategy already supplied semantic scores; Generator only converts
-            them into a deterministic title-budget value.
-            """
-
-            try:
-                adjusted_score = float(
-                    candidate.get(
-                        "adjusted_score",
-                        candidate.get(
-                            "final_score",
-                            0,
-                        ),
-                    )
-                    or 0
-                )
-            except Exception:
-                adjusted_score = 0.0
-
-            incremental = candidate.get(
-                "incremental_value",
-                {},
-            )
-
-            if not isinstance(
-                incremental,
-                dict,
-            ):
-                incremental = {}
-
-            try:
-                selection_value = float(
-                    incremental.get(
-                        "selection_value",
-                        0,
-                    )
-                    or 0
-                )
-            except Exception:
-                selection_value = 0.0
-
-            try:
-                new_information = float(
-                    incremental.get(
-                        "new_information",
-                        0,
-                    )
-                    or 0
-                )
-            except Exception:
-                new_information = 0.0
-
-            try:
-                redundancy_penalty = float(
-                    incremental.get(
-                        "redundancy_penalty",
-                        0,
-                    )
-                    or 0
-                )
-            except Exception:
-                redundancy_penalty = 0.0
-
-            shortest_text = shortest_candidate_text(
-                candidate
-            )
-
-            character_cost = max(
-                1,
-                len(shortest_text),
-            )
-
-            # Absolute semantic value first.
-            # Character efficiency is a secondary signal, not the main score,
-            # so very short low-value tokens cannot automatically beat a much
-            # more valuable model/specification.
-            semantic_value = max(
-                0.0,
-                (
-                    adjusted_score
-                    * 0.55
-                    +
-                    selection_value
-                    * 0.25
-                    +
-                    new_information
-                    * 0.20
-                    -
-                    redundancy_penalty
-                    * 0.15
-                ),
-            )
-
-            value_density = (
-                semantic_value
-                /
-                character_cost
-            )
-
-            return {
-                "semantic_value":
-                    semantic_value,
-                "value_density":
-                    value_density,
-                "character_cost":
-                    character_cost,
-                "adjusted_score":
-                    adjusted_score,
-                "selection_value":
-                    selection_value,
-                "new_information":
-                    new_information,
-                "redundancy_penalty":
-                    redundancy_penalty,
-            }
-
-
-        def optional_value_sort_key(
-            item,
-        ):
-            """
-            Highest total value first, then value/character.
-            Original index is the final deterministic tie-breaker.
-            """
-
-            index, candidate = item
-
-            if not isinstance(
-                candidate,
-                dict,
-            ):
-                return (
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    -index,
-                )
-
-            metrics = optional_value_metrics(
-                candidate
-            )
-
-            return (
-                metrics[
-                    "semantic_value"
-                ],
-                metrics[
-                    "value_density"
-                ],
-                metrics[
-                    "selection_value"
-                ],
-                metrics[
-                    "adjusted_score"
-                ],
-                -index,
-            )
-
-
-        for core_index, core_candidate in enumerate(
+        for index, candidate in enumerate(
             candidates
         ):
-
-            if not isinstance(
-                core_candidate,
-                dict,
-            ):
-                continue
-
-            core_type = normalize_text(
-                core_candidate.get(
-                    "type",
-                    "",
-                )
-            ).upper()
-
-            if (
-                core_type == "IDENTITY"
-                and
-                identity_candidate is None
-            ):
-                identity_candidate = core_candidate
-                continue
-
-            if core_type == "COMPATIBILITY":
-                compatibility_core.append(
-                    core_candidate
-                )
-                continue
-
-            if (
-                core_type != "QUANTITY"
-                and
-                bool(
-                    core_candidate.get(
-                        "required",
-                        False,
-                    )
-                )
-            ):
-                required_core_candidates.append(
-                    (
-                        core_index,
-                        core_candidate,
-                    )
-                )
-
-
-        required_core_candidates.sort(
-            key=required_core_sort_key
-        )
-
-        required_core = [
-            candidate
-            for _, candidate
-            in required_core_candidates
-        ]
-
-
-        force_identity_short = False
-        protected_core_unresolved = False
-
-        protected_core_debug = {
-            "full_identity_bundle_length": None,
-            "short_identity_bundle_length": None,
-            "identity_short_forced": False,
-            "protected_required_count": len(required_core),
-            "protected_required_types": [
-                normalize_text(
-                    candidate.get(
-                        "type",
-                        "",
-                    )
-                ).upper()
-                for candidate in required_core
-            ],
-            "resolved": True,
-        }
-
-
-        if identity_candidate is not None:
-
-            identity_full = normalize_text(
-                identity_candidate.get("text", "")
-            )
-            identity_short = normalize_text(
-                identity_candidate.get("short_text", "")
-            )
-
-            protected_tail = []
-
-            for protected_candidate in (
-                compatibility_core + required_core
-            ):
-                protected_text = shortest_candidate_text(
-                    protected_candidate
-                )
-                if protected_text:
-                    protected_tail.append(protected_text)
-
-            full_bundle = (
-                list(title_parts)
-                + [identity_full]
-                + protected_tail
-            )
-
-            full_bundle_length = joined_length(full_bundle)
-
-            protected_core_debug[
-                "full_identity_bundle_length"
-            ] = full_bundle_length
-
-            if full_bundle_length > 75:
-
-                if (
-                    identity_short
-                    and identity_short.casefold()
-                    != identity_full.casefold()
-                ):
-                    short_bundle = (
-                        list(title_parts)
-                        + [identity_short]
-                        + protected_tail
-                    )
-
-                    short_bundle_length = joined_length(
-                        short_bundle
-                    )
-
-                    protected_core_debug[
-                        "short_identity_bundle_length"
-                    ] = short_bundle_length
-
-                    if short_bundle_length <= 75:
-                        force_identity_short = True
-                        protected_core_debug[
-                            "identity_short_forced"
-                        ] = True
-                    else:
-                        protected_core_unresolved = True
-                else:
-                    protected_core_unresolved = True
-
-            protected_core_debug[
-                "resolved"
-            ] = not protected_core_unresolved
-
-
-        # =================================================
-        # 8. Value-Protected Execution Order
-        #
-        # Quantity is already handled as the fixed prefix.
-        #
-        # Generator protects the two title elements that must not be crowded
-        # out by optional information:
-        #   1. Primary IDENTITY
-        #   2. COMPATIBILITY brand phrase
-        #
-        # All remaining candidates keep their original Strategy order.
-        # This is not a new semantic ranking layer; it only reserves title
-        # budget for the already-defined protected elements.
-        # =================================================
-
-        indexed_candidates = list(
-            enumerate(
-                candidates
-            )
-        )
-
-        protected_identity = [
-            item
-            for item in indexed_candidates
-            if normalize_text(
-                (
-                    item[1].get("type", "")
-                    if isinstance(item[1], dict)
-                    else ""
-                )
-            ).upper()
-            == "IDENTITY"
-        ]
-
-        protected_compatibility = [
-            item
-            for item in indexed_candidates
-            if normalize_text(
-                (
-                    item[1].get("type", "")
-                    if isinstance(item[1], dict)
-                    else ""
-                )
-            ).upper()
-            == "COMPATIBILITY"
-        ]
-
-        protected_required = []
-
-        protected_identity_indexes = {
-            index
-            for index, _
-            in protected_identity
-        }
-
-        protected_compatibility_indexes = {
-            index
-            for index, _
-            in protected_compatibility
-        }
-
-
-        for item in indexed_candidates:
-
-            index, candidate = item
-
-            if (
-                index in protected_identity_indexes
-                or
-                index in protected_compatibility_indexes
-            ):
-                continue
-
-            if not isinstance(
-                candidate,
-                dict,
-            ):
-                continue
-
-            candidate_type = normalize_text(
-                candidate.get(
-                    "type",
-                    "",
-                )
-            ).upper()
-
-            if (
-                candidate_type != "QUANTITY"
-                and
-                bool(
-                    candidate.get(
-                        "required",
-                        False,
-                    )
-                )
-            ):
-                protected_required.append(
-                    item
-                )
-
-
-        protected_required.sort(
-            key=required_core_sort_key
-        )
-
-
-        protected_indexes = {
-            index
-            for index, _
-            in (
-                protected_identity
-                +
-                protected_compatibility
-                +
-                protected_required
-            )
-        }
-
-        remaining_candidates = [
-            item
-            for item in indexed_candidates
-            if item[0] not in protected_indexes
-        ]
-
-        # =================================================
-        # V3.7 Optional Value Allocation
-        #
-        # Optional candidates compete for the remaining budget according
-        # to Strategy-supplied value signals instead of raw JSON order.
-        #
-        # This fixes cases where a low-value SECONDARY_IDENTITY / usage
-        # token appears earlier in the array and crowds out a substantially
-        # more valuable optional model or specification.
-        #
-        # IMPORTANT:
-        # This is not a new semantic understanding layer.
-        # Generator does not decide what the product is.
-        # It only allocates the remaining characters using scores already
-        # produced by Title Strategy.
-        # =================================================
-
-        remaining_candidates.sort(
-            key=optional_value_sort_key,
-            reverse=True,
-        )
-
-        optional_allocation_debug = []
-
-        for optional_index, optional_candidate in remaining_candidates:
-
-            if not isinstance(
-                optional_candidate,
-                dict,
-            ):
-                continue
-
-            metrics = optional_value_metrics(
-                optional_candidate
-            )
-
-            optional_allocation_debug.append(
-                {
-                    "index":
-                        optional_index,
-                    "text":
-                        normalize_text(
-                            optional_candidate.get(
-                                "text",
-                                "",
-                            )
-                        ),
-                    "type":
-                        normalize_text(
-                            optional_candidate.get(
-                                "type",
-                                "OTHER",
-                            )
-                        ).upper(),
-                    "semantic_value":
-                        round(
-                            metrics[
-                                "semantic_value"
-                            ],
-                            4,
-                        ),
-                    "value_density":
-                        round(
-                            metrics[
-                                "value_density"
-                            ],
-                            4,
-                        ),
-                    "character_cost":
-                        metrics[
-                            "character_cost"
-                        ],
-                    "selection_value":
-                        metrics[
-                            "selection_value"
-                        ],
-                    "adjusted_score":
-                        metrics[
-                            "adjusted_score"
-                        ],
-                }
-            )
-
-
-        execution_candidates = (
-            protected_identity
-            +
-            protected_compatibility
-            +
-            protected_required
-            +
-            remaining_candidates
-        )
-
-        core_overflow_mode = bool(
-            protected_core_unresolved
-        )
-
-        core_overflow_dropped_required = []
-
-        # Fail-closed priority lock:
-        # if a higher protected required item cannot fit, lower-priority
-        # items may not consume the remaining budget.
-        protected_priority_blocked = False
-        protected_priority_blocked_by = None
-
-        for index, candidate in execution_candidates:
-
-            # =================================================
-            # V3.7.1 Core Overflow Priority Lock
-            # =================================================
-            if protected_priority_blocked:
-
-                if isinstance(
-                    candidate,
-                    dict,
-                ):
-                    blocked_text = normalize_text(
-                        candidate.get(
-                            "text",
-                            "",
-                        )
-                    )
-                    blocked_type = normalize_text(
-                        candidate.get(
-                            "type",
-                            "OTHER",
-                        )
-                    ).upper()
-                    blocked_priority = normalize_text(
-                        candidate.get(
-                            "priority",
-                            "C",
-                        )
-                    ).upper()
-                    blocked_required = bool(
-                        candidate.get(
-                            "required",
-                            False,
-                        )
-                    )
-                else:
-                    blocked_text = ""
-                    blocked_type = "OTHER"
-                    blocked_priority = "C"
-                    blocked_required = False
-
-                rejected_candidates.append(
-                    {
-                        "index":
-                            index,
-                        "text":
-                            blocked_text,
-                        "type":
-                            blocked_type,
-                        "priority":
-                            blocked_priority,
-                        "required":
-                            blocked_required,
-                        "reason":
-                            "blocked_by_higher_priority_core_overflow",
-                        "blocked_by":
-                            protected_priority_blocked_by,
-                        "current_length":
-                            len(
-                                current_title()
-                            ),
-                    }
-                )
-
-                continue
 
                         # ---------------------------------------------
             # Candidate必须是dict
@@ -1619,92 +858,14 @@ class TitleGenerator:
             # 也不重新理解产品。
             # =================================================
 
-            # If Strategy could not provide a short identity that resolves
-            # an over-budget protected core, do not fill remaining space
-            # with lower-value optional content after a protected item is lost.
-            if (
-                protected_core_unresolved
-                and
-                not required
-            ):
-
-                rejected_candidates.append(
-                    {
-                        "index": index,
-                        "text": text,
-                        "short_text": normalize_text(
-                            candidate.get(
-                                "short_text",
-                                "",
-                            )
-                        ),
-                        "type": candidate_type,
-                        "priority": priority,
-                        "required": required,
-                        "reason": "protected_core_unresolved",
-                        "current_length": len(
-                            current_title()
-                        ),
-                        "text_length": len(text),
-                        "short_text_length": len(
-                            normalize_text(
-                                candidate.get(
-                                    "short_text",
-                                    "",
-                                )
-                            )
-                        ),
-                    }
-                )
-
-                continue
-
-
-            budget_candidate = candidate
-
-
-            if (
-                candidate_type == "IDENTITY"
-                and
-                force_identity_short
-            ):
-
-                forced_short = normalize_text(
-                    candidate.get(
-                        "short_text",
-                        "",
-                    )
-                )
-
-                if forced_short:
-                    budget_candidate = dict(candidate)
-                    budget_candidate["text"] = forced_short
-                    budget_candidate["short_text"] = ""
-
-
             budget_result = (
                 CandidateBudgetEngine
                 .choose_candidate_text(
                     parts=title_parts,
-                    candidate=budget_candidate,
+                    candidate=candidate,
                     max_length=75,
                 )
             )
-
-
-            if (
-                candidate_type == "IDENTITY"
-                and
-                force_identity_short
-                and
-                budget_result.get(
-                    "accepted",
-                    False,
-                )
-            ):
-                budget_result[
-                    "source"
-                ] = "protected_core_short_text"
 
 
             accepted = bool(
@@ -1822,39 +983,6 @@ class TitleGenerator:
             # =================================================
             # Candidate 未接受
             # =================================================
-
-            if (
-                core_overflow_mode
-                and
-                required
-            ):
-                dropped_required_item = {
-                    "index":
-                        index,
-                    "text":
-                        text,
-                    "type":
-                        candidate_type,
-                    "priority":
-                        priority,
-                    "reason":
-                        "required_candidate_did_not_fit_75",
-                }
-
-                core_overflow_dropped_required.append(
-                    dropped_required_item
-                )
-
-                protected_priority_blocked = True
-                protected_priority_blocked_by = {
-                    "index":
-                        index,
-                    "text":
-                        text,
-                    "type":
-                        candidate_type,
-                }
-
 
             rejected_item = {
 
@@ -2105,7 +1233,7 @@ class TitleGenerator:
             # =============================================
 
             "generator_version":
-                "V3.7.1-optional-value-allocation-priority-lock",
+                "V3.2-title-completion",
 
             "budget_parts":
                 title_parts,
@@ -2130,42 +1258,6 @@ class TitleGenerator:
                         title
                     ),
                 ),
-
-            "protected_core":
-                {
-                    **protected_core_debug,
-
-                    # Strategy-level result:
-                    # Can every protected required item fit in its shortest
-                    # safe representation?
-                    "strategy_bundle_resolved":
-                        not core_overflow_mode,
-
-                    # Execution-level result:
-                    # Did Generator have to drop any required item to stay
-                    # within the 75-character hard limit?
-                    "execution_resolved":
-                        len(
-                            core_overflow_dropped_required
-                        )
-                        ==
-                        0,
-
-                    "core_overflow_mode":
-                        core_overflow_mode,
-
-                    "dropped_required":
-                        core_overflow_dropped_required,
-
-                    "priority_lock_triggered":
-                        protected_priority_blocked,
-
-                    "priority_lock_blocked_by":
-                        protected_priority_blocked_by,
-                },
-
-            "optional_allocation":
-                optional_allocation_debug,
         }
 
     # =====================================================
