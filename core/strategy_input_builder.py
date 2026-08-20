@@ -19,7 +19,7 @@ class StrategyInputBuilder:
     - 不做 Candidate 排序
     """
 
-    SCHEMA_VERSION = "1.0"
+    SCHEMA_VERSION = "1.1-hard-title-constraints"
 
     @staticmethod
     def _dict(
@@ -191,6 +191,23 @@ class StrategyInputBuilder:
                 StrategyInputBuilder.SCHEMA_VERSION,
 
             # -----------------------------------------
+            # Hard title constraints
+            #
+            # These are execution requirements, not preferences.
+            # Strategy must create enough VERIFIED candidate coverage to
+            # support the 61–75 character target whenever source facts allow.
+            # -----------------------------------------
+
+            "title_constraints": {
+                "min_length_exclusive": 60,
+                "min_length": 61,
+                "max_length": 75,
+                "identity_required": True,
+                "compatibility_required_when_present": True,
+                "no_invented_filler": True,
+            },
+
+            # -----------------------------------------
             # Locked decisions
             # Title Strategy不得重新决定
             # -----------------------------------------
@@ -334,6 +351,42 @@ class StrategyInputBuilder:
                     StrategyInputBuilder._list(
                         feature_classification.get(
                             "specifications",
+                            [],
+                        )
+                    ),
+
+                # V1.1 Candidate Pool Expansion
+                #
+                # These are candidate SOURCES only. Strategy must still verify
+                # that they are fact-supported and add incremental value.
+                "search_primary_keywords":
+                    StrategyInputBuilder._list(
+                        seo.get(
+                            "primary_keywords",
+                            [],
+                        )
+                    ),
+
+                "search_secondary_keywords":
+                    StrategyInputBuilder._list(
+                        seo.get(
+                            "secondary_keywords",
+                            [],
+                        )
+                    ),
+
+                "locked_all_models":
+                    StrategyInputBuilder._list(
+                        normalized_models.get(
+                            "all",
+                            [],
+                        )
+                    ),
+
+                "locked_secondary_models":
+                    StrategyInputBuilder._list(
+                        normalized_models.get(
+                            "secondary",
                             [],
                         )
                     ),
