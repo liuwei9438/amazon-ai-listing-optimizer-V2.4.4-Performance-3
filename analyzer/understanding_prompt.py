@@ -543,6 +543,44 @@ Capacity information.
 ## 5. Brand Handling
 
 
+SOURCE BRAND HYGIENE — IMPORTANT
+
+Collected marketplace data may contain the source seller's / store's own
+brand name inside the title, bullets, description, details, or metadata.
+
+Treat these as two different concepts:
+
+seller_brand:
+- the merchant/store/private-label brand belonging to the listing seller
+- source-shop branding or seller-created brand wording
+- NOT a compatibility target
+- NOT part of product identity
+- NOT a search term to preserve in generated listing content
+
+third_party_brands:
+- external equipment/product brands that the item is genuinely compatible with
+- may be used only with explicit compatibility wording
+
+If a source seller/store brand is identifiable:
+- put it only in brand_info.seller_brand
+- DO NOT copy it into third_party_brands
+- DO NOT copy it into detected_brands
+- DO NOT copy it into compatibility.brands
+- DO NOT include it in product_identity.name
+- DO NOT include it in title_product_identity
+- DO NOT preserve it in title, bullets, highlights, description, SEO keywords
+  or backend keywords
+- remove it mentally from the source before deciding the real product identity
+
+Never infer that a seller/store brand is a compatibility brand merely because
+it appears in the source title or description.
+
+When brand ownership is uncertain:
+- do not label an arbitrary product brand as seller_brand
+- only classify as seller_brand when source context reasonably indicates it is
+  the listing seller/store/private-label branding
+
+
 For brand information:
 
 
