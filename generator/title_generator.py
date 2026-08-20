@@ -408,6 +408,100 @@ class TitleGenerator:
 
 
         # =================================================
+        # V3.8 Strategy Execution Consistency
+        #
+        # Generator still does NOT reinterpret the product.
+        # It only executes explicit Strategy metadata more faithfully:
+        # - exact Strategy exclude gate
+        # - required / priority / type execution order
+        # - model/part candidates cannot be blocked by lower-value usage
+        # =================================================
+
+        def strategy_key(value):
+            return re.sub(
+                r"\s+",
+                " ",
+                normalize_text(value).casefold(),
+            ).strip()
+
+
+        strategy_excludes = title_strategy.get(
+            "exclude",
+            [],
+        )
+
+        if not isinstance(strategy_excludes, list):
+            strategy_excludes = []
+
+        excluded_keys = {
+            strategy_key(item)
+            for item in strategy_excludes
+            if strategy_key(item)
+        }
+
+
+        priority_rank = {
+            "S": 0,
+            "A": 1,
+            "B": 2,
+            "C": 3,
+            "D": 4,
+        }
+
+        type_rank = {
+            "IDENTITY": 0,
+            "COMPATIBILITY": 1,
+            "MODEL": 2,
+            "PART_NUMBER": 2,
+            "SPECIFICATION": 3,
+            "FEATURE": 4,
+            "MATERIAL": 4,
+            "USAGE": 5,
+            "OTHER": 6,
+        }
+
+
+        def execution_sort_key(item):
+            original_index, candidate = item
+
+            if not isinstance(candidate, dict):
+                return (9, 9, 9, 0.0, original_index)
+
+            required = candidate.get("required", False) is True
+            priority = normalize_text(
+                candidate.get("priority", "C")
+            ).upper()
+            candidate_type = normalize_text(
+                candidate.get("type", "OTHER")
+            ).upper()
+
+            try:
+                score = float(
+                    candidate.get(
+                        "adjusted_score",
+                        candidate.get("final_score", 0),
+                    )
+                    or 0
+                )
+            except (TypeError, ValueError):
+                score = 0.0
+
+            return (
+                0 if required else 1,
+                priority_rank.get(priority, 5),
+                type_rank.get(candidate_type, 6),
+                -score,
+                original_index,
+            )
+
+
+        execution_candidates = sorted(
+            list(enumerate(candidates)),
+            key=execution_sort_key,
+        )
+
+
+        # =================================================
         # 5. 精确去重
         #
         # Generator只判断：
@@ -655,17 +749,24 @@ class TitleGenerator:
             # Multi-unit quantities remain fixed prefixes.
             # =================================================
 
-            quantity_match = __import__("re").match(
-                r"^\s*(\d+)\s*(?:x|pc|pcs|piece|pieces)?\b",
+            quantity_match = re.match(
+                r"^\s*(\d+)\s*(x|pc|pcs|piece|pieces)?\b",
                 quantity_text,
-                flags=__import__("re").IGNORECASE,
+                flags=re.IGNORECASE,
             )
+
+            quantity_value = None
+            quantity_unit = ""
 
             if quantity_match:
                 try:
                     quantity_value = int(quantity_match.group(1))
                 except (TypeError, ValueError):
                     quantity_value = None
+
+                quantity_unit = str(
+                    quantity_match.group(2) or ""
+                ).lower()
 
                 if quantity_value == 1:
                     continue
@@ -688,6 +789,24 @@ class TitleGenerator:
             )
 
             if quantity_text:
+
+                # V3.8 compact quantity prefix:
+                # 10 Pieces / 10 PCS / 10pcs / 10x -> 10pcs
+                # This saves title budget without changing quantity facts.
+                compact_match = re.match(
+                    r"^\s*(\d+)\s*(x|pc|pcs|piece|pieces)\b",
+                    quantity_text,
+                    flags=re.IGNORECASE,
+                )
+
+                if compact_match:
+                    try:
+                        compact_value = int(compact_match.group(1))
+                    except (TypeError, ValueError):
+                        compact_value = None
+
+                    if compact_value is not None and compact_value > 1:
+                        quantity_text = f"{compact_value}pcs"
 
                 title_parts.append(
                     quantity_text
@@ -750,9 +869,7 @@ class TitleGenerator:
         # Generator只执行这个顺序。
         # =================================================
 
-        for index, candidate in enumerate(
-            candidates
-        ):
+        for index, candidate in execution_candidates:
 
                         # ---------------------------------------------
             # Candidate必须是dict
@@ -776,6 +893,41 @@ class TitleGenerator:
                     }
                 )
 
+                continue
+
+
+            # ---------------------------------------------
+            # V3.8 Strategy Exclude Gate
+            #
+            # If Strategy explicitly placed a candidate text in exclude,
+            # Generator must never re-admit it merely because it fits.
+            # ---------------------------------------------
+
+            candidate_text_for_exclude = normalize_text(
+                candidate.get("text", "")
+            )
+
+            if (
+                candidate_text_for_exclude
+                and strategy_key(candidate_text_for_exclude) in excluded_keys
+            ):
+                rejected_candidates.append(
+                    {
+                        "index": index,
+                        "text": candidate_text_for_exclude,
+                        "short_text": normalize_text(
+                            candidate.get("short_text", "")
+                        ),
+                        "type": normalize_text(
+                            candidate.get("type", "OTHER")
+                        ).upper(),
+                        "priority": normalize_text(
+                            candidate.get("priority", "C")
+                        ).upper(),
+                        "required": bool(candidate.get("required", False)),
+                        "reason": "strategy_exclude",
+                    }
+                )
                 continue
 
 
@@ -858,11 +1010,28 @@ class TitleGenerator:
             # 也不重新理解产品。
             # =================================================
 
+            candidate_for_budget = candidate
+
+            # Compatibility wording must remain the exact compliance form
+            # "Compatible with ...". Strategy may occasionally suggest an
+            # abbreviation such as "Compat. with"; Generator must not use it.
+            if candidate_type == "COMPATIBILITY":
+                short_text = normalize_text(
+                    candidate.get("short_text", "")
+                )
+
+                if (
+                    short_text
+                    and not short_text.casefold().startswith("compatible with ")
+                ):
+                    candidate_for_budget = dict(candidate)
+                    candidate_for_budget["short_text"] = ""
+
             budget_result = (
                 CandidateBudgetEngine
                 .choose_candidate_text(
                     parts=title_parts,
-                    candidate=candidate,
+                    candidate=candidate_for_budget,
                     max_length=75,
                 )
             )
@@ -1233,7 +1402,7 @@ class TitleGenerator:
             # =============================================
 
             "generator_version":
-                "V3.2-title-completion",
+                "V3.8-strategy-execution-consistency",
 
             "budget_parts":
                 title_parts,
