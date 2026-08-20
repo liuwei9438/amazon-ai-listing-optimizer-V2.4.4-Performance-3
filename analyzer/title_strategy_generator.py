@@ -654,6 +654,367 @@ class TitleStrategyGenerator:
                 }
             )
         # =============================================
+        # V3.0 Required Budget Arbitration
+        #
+        # Root cause:
+        # The AI may mark too many FEATURE / SPECIFICATION / MATERIAL /
+        # COLOR candidates as required. If every "required" flag is treated
+        # as untouchable, the protected bundle itself can exceed 75 chars.
+        #
+        # Rule:
+        # 1. Never demote IDENTITY.
+        # 2. Never demote COMPATIBILITY.
+        # 3. Never demote multi-unit QUANTITY.
+        # 4. Protect up to the two strongest required MODEL/PART_NUMBER
+        #    candidates.
+        # 5. Other AI-required candidates remain required only while the
+        #    shortest safe protected bundle fits within 75 characters.
+        # 6. When the bundle is too long, demote the lowest marginal-value
+        #    non-core required candidate to optional and repeat.
+        #
+        # This is NOT semantic rewriting. It only resolves conflicts between
+        # AI "required" flags under the fixed 75-character title budget.
+        # =============================================
+
+        def candidate_shortest_text(
+            candidate,
+        ):
+
+            full_text = str(
+                candidate.get(
+                    "text",
+                    ""
+                )
+                or
+                ""
+            ).strip()
+
+            short_text = str(
+                candidate.get(
+                    "short_text",
+                    ""
+                )
+                or
+                ""
+            ).strip()
+
+            if (
+                short_text
+                and
+                len(short_text)
+                <
+                len(full_text)
+            ):
+                return short_text
+
+            return full_text
+
+
+        def bundle_length(
+            bundle,
+        ):
+
+            parts = [
+                candidate_shortest_text(
+                    candidate
+                )
+                for candidate in bundle
+            ]
+
+            parts = [
+                part
+                for part in parts
+                if part
+            ]
+
+            return len(
+                " ".join(
+                    parts
+                )
+            )
+
+
+        # Preserve the AI decision for diagnostics.
+        for candidate in normalized_candidates:
+
+            candidate[
+                "required_by_ai"
+            ] = bool(
+                candidate.get(
+                    "required",
+                    False
+                )
+            )
+
+            candidate[
+                "required_budget_demoted"
+            ] = False
+
+
+        fixed_required = []
+        model_required = []
+        flexible_required = []
+
+        for candidate in normalized_candidates:
+
+            if not candidate.get(
+                "required",
+                False
+            ):
+                continue
+
+            candidate_type = str(
+                candidate.get(
+                    "type",
+                    ""
+                )
+                or
+                ""
+            ).upper()
+
+            if candidate_type in {
+                "IDENTITY",
+                "COMPATIBILITY",
+                "QUANTITY",
+            }:
+                fixed_required.append(
+                    candidate
+                )
+                continue
+
+            if candidate_type in {
+                "MODEL",
+                "PART_NUMBER",
+            }:
+                model_required.append(
+                    candidate
+                )
+                continue
+
+            flexible_required.append(
+                candidate
+            )
+
+
+        def required_value_key(
+            candidate,
+        ):
+
+            try:
+                adjusted_score = float(
+                    candidate.get(
+                        "adjusted_score",
+                        0
+                    )
+                    or
+                    0
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                adjusted_score = 0.0
+
+            incremental = candidate.get(
+                "incremental_value",
+                {}
+            )
+
+            if not isinstance(
+                incremental,
+                dict,
+            ):
+                incremental = {}
+
+            try:
+                selection_value = float(
+                    incremental.get(
+                        "selection_value",
+                        0
+                    )
+                    or
+                    0
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                selection_value = 0.0
+
+            try:
+                new_information = float(
+                    incremental.get(
+                        "new_information",
+                        0
+                    )
+                    or
+                    0
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                new_information = 0.0
+
+            length_cost = max(
+                1,
+                len(
+                    candidate_shortest_text(
+                        candidate
+                    )
+                )
+            )
+
+            # Higher = more valuable per character.
+            efficiency = (
+                adjusted_score
+                * 0.50
+                +
+                selection_value
+                * 0.30
+                +
+                new_information
+                * 0.20
+            ) / length_cost
+
+            return (
+                efficiency,
+                adjusted_score,
+                selection_value,
+                new_information,
+            )
+
+
+        # Protect at most the two strongest AI-required models/parts.
+        model_required.sort(
+            key=required_value_key,
+            reverse=True,
+        )
+
+        protected_model_required = (
+            model_required[:2]
+        )
+
+        for candidate in model_required[2:]:
+
+            candidate[
+                "required"
+            ] = False
+
+            candidate[
+                "required_budget_demoted"
+            ] = True
+
+            candidate[
+                "required_budget_reason"
+            ] = (
+                "more_than_two_primary_model_or_part_candidates"
+            )
+
+
+        active_flexible_required = list(
+            flexible_required
+        )
+
+        protected_bundle = (
+            fixed_required
+            +
+            protected_model_required
+            +
+            active_flexible_required
+        )
+
+
+        # Demote lowest marginal-value flexible required candidates until the
+        # shortest safe bundle fits. IDENTITY / COMPATIBILITY / QUANTITY and
+        # the strongest 1-2 model/part candidates remain protected.
+        while (
+            bundle_length(
+                protected_bundle
+            )
+            >
+            75
+            and
+            active_flexible_required
+        ):
+
+            candidate_to_demote = min(
+                active_flexible_required,
+                key=required_value_key,
+            )
+
+            candidate_to_demote[
+                "required"
+            ] = False
+
+            candidate_to_demote[
+                "required_budget_demoted"
+            ] = True
+
+            candidate_to_demote[
+                "required_budget_reason"
+            ] = (
+                "protected_required_bundle_exceeds_75"
+            )
+
+            active_flexible_required.remove(
+                candidate_to_demote
+            )
+
+            protected_bundle = (
+                fixed_required
+                +
+                protected_model_required
+                +
+                active_flexible_required
+            )
+
+
+        required_budget_summary = {
+            "protected_bundle_length":
+                bundle_length(
+                    protected_bundle
+                ),
+            "ai_required_count":
+                sum(
+                    1
+                    for candidate
+                    in normalized_candidates
+                    if candidate.get(
+                        "required_by_ai",
+                        False
+                    )
+                ),
+            "final_required_count":
+                sum(
+                    1
+                    for candidate
+                    in normalized_candidates
+                    if candidate.get(
+                        "required",
+                        False
+                    )
+                ),
+            "demoted_count":
+                sum(
+                    1
+                    for candidate
+                    in normalized_candidates
+                    if candidate.get(
+                        "required_budget_demoted",
+                        False
+                    )
+                ),
+            "resolved":
+                bundle_length(
+                    protected_bundle
+                )
+                <=
+                75,
+        }
+
+
+        # =============================================
         # Candidate Final Ordering
         #
         # Title Strategy AI 负责：
@@ -861,7 +1222,11 @@ class TitleStrategyGenerator:
         # =============================================
 
         result[
+            "required_budget"
+        ] = required_budget_summary
+
+        result[
             "schema_version"
-        ] = "2.9-value-protected-title-allocation"
+        ] = "3.0-required-budget-arbitration"
 
         return result
