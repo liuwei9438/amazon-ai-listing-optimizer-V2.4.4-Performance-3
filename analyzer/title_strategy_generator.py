@@ -1,494 +1,281 @@
 from __future__ import annotations
 
-import re
+import json
 
-from generator.candidate_budget import CandidateBudgetEngine
+from openai import OpenAI
 
+from services.ai_runtime import DEFAULT_TIMEOUT_SECONDS, execute_with_retry
 
-class TitleGenerator:
+from .title_strategy_prompt import (
+    TITLE_STRATEGY_SYSTEM_PROMPT,
+)
 
 
-    BLOCKED_WORDS = [
-        "best",
-        "best seller",
-        "#1",
-        "premium",
-        "original",
-        "genuine",
-        "official",
-        "authentic",
-        "hot sale",
-        "discount",
-        "promotion",
-        "oem",
-    ]
+class TitleStrategyError(Exception):
+    pass
 
 
-    IGNORED_ATTRIBUTES = [
-        "PP",
-        "ABS",
-        "plastic",
-        "metal",
-        "stainless steel",
-    ]
-    @staticmethod
-    def add_budget_part(
-        title_parts,
-        text,
-        max_length=75,
-        required=False,
-    ):
-        """
-        将一个候选标题元素加入 title_parts。
+class TitleStrategyGenerator:
 
-        统一负责：
-
-        1. 空值过滤
-        2. 完全重复过滤
-        3. 语义包含重复过滤
-        4. 75字符预算检查
-        5. required 信息保护
-
-        返回：
-            True  -> 已加入
-            False -> 未加入
-        """
-
-        if text is None:
-            return False
-
-
-        text = str(
-            text
-        ).strip()
-
-
-        if not text:
-            return False
-
-
-        # ==========================================
-        # 1. 完全重复检查
-        # ==========================================
-
-        for existing in title_parts:
-
-            if (
-                str(existing)
-                .strip()
-                .lower()
-                ==
-                text.lower()
-            ):
-
-                return False
-
-
-        # ==========================================
-        # 2. 语义包含检查
-        #
-        # 例如：
-        #
-        # 已有：
-        # 9D Floating Head Shaver
-        #
-        # 新：
-        # 9D Floating Head
-        #
-        # 不再重复加入。
-        # ==========================================
-
-        if TitleGenerator.is_contained_information(
-            text,
-            title_parts,
-        ):
-
-            return False
-
-
-        # ==========================================
-        # 3. 计算加入后的标题长度
-        # ==========================================
-
-        candidate_parts = (
-            list(title_parts)
-            +
-            [text]
-        )
-
-
-        candidate_title = " ".join(
-            str(item).strip()
-            for item in candidate_parts
-            if str(item).strip()
-        )
-
-
-        # ==========================================
-        # 4. 预算检查
-        # ==========================================
-
-        if len(candidate_title) <= max_length:
-
-            title_parts.append(
-                text
-            )
-
-            return True
-
-
-        # ==========================================
-        # 5. Required
-        #
-        # required=True 不代表强行超过75字符。
-        #
-        # 它表示：
-        # 这是高价值信息，但当前剩余预算不足。
-        #
-        # 先返回False。
-        # 后续V2第二阶段会加入：
-        # lower priority replacement。
-        # ==========================================
-
-        if required:
-
-            return False
-
-
-        return False
-    @staticmethod
-    def is_contained_information(
-        new_text,
-        existing_parts,
-    ):
-        """
-        判断候选信息是否已经被已有标题表达。
-
-        只做通用文本包含判断，
-        不包含具体产品规则。
-        """
-
-        if not new_text:
-            return False
-
-
-        def normalize_words(text):
-
-            words = re.findall(
-                r"[A-Za-z0-9\-]+",
-                str(text).lower(),
-            )
-
-
-            ignore_words = {
-                "with",
-                "for",
-                "and",
-                "the",
-                "a",
-                "an",
-            }
-
-
-            result = set()
-
-
-            for word in words:
-
-                if not word:
-                    continue
-
-
-                if word in ignore_words:
-                    continue
-
-
-                # 轻量单复数归一化
-                # heads -> head
-                # buttons -> button
-                if (
-                    len(word) > 4
-                    and
-                    word.endswith("s")
-                    and
-                    not word.endswith(
-                        (
-                            "ss",
-                            "us",
-                            "is",
-                        )
-                    )
-                ):
-
-                    word = word[:-1]
-
-
-                result.add(
-                    word
-                )
-
-
-            return result
-
-
-        new_words = normalize_words(
-            new_text
-        )
-
-
-        if not new_words:
-            return False
-
-
-        for existing in existing_parts:
-
-            existing_words = normalize_words(
-                existing
-            )
-
-
-            if not existing_words:
-                continue
-
-
-            # 完全一致
-            if new_words == existing_words:
-
-                return True
-
-
-            # 新信息已经完整包含于已有信息
-            if new_words.issubset(
-                existing_words
-            ):
-
-                return True
-
-
-        return False
     @staticmethod
     def generate(
         profile: dict,
-    ) -> dict:
-        """
-        TitleGenerator V3
+        api_key: str,
+        model="gpt-4.1-mini",
+    ):
 
-        设计原则：
-
-        1. Title Strategy 负责理解产品
-        2. title_candidates 负责给出已经排序好的运营决策
-        3. Generator 不重新判断产品价值
-        4. Generator 不猜型号、规格、兼容关系或功能
-        5. Generator 不重新排序 candidates
-        6. Generator 只负责：
-           - Schema读取
-           - 精确去重
-           - 75字符预算
-           - 合规清理
-           - 输出
-
-        title_candidates 是唯一正式标题输入。
-        """
+        client = OpenAI(
+            api_key=api_key,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
 
         # =================================================
-        # 1. 基础输入
+        # Title Strategy Input
+        #
+        # Title Strategy 只读取已经标准化后的统一输入。
+        #
+        # 不再直接读取：
+        # - product_identity
+        # - product_knowledge
+        # - compatibility
+        # - fact_lock
+        # - basic_info
+        #
+        # 避免多个事实来源重新产生歧义。
         # =================================================
 
-        if not isinstance(
-            profile,
-            dict,
-        ):
-            raise ValueError(
-                "TitleGenerator profile must be a dictionary"
-            )
-
-
-        title_strategy = profile.get(
-            "title_strategy",
+        strategy_input = profile.get(
+            "title_strategy_input",
             {},
         )
 
-
         if not isinstance(
-            title_strategy,
+            strategy_input,
             dict,
         ):
-            title_strategy = {}
+            raise TitleStrategyError(
+                "title_strategy_input must be a dictionary"
+            )
+
+        if not strategy_input:
+            raise TitleStrategyError(
+                "title_strategy_input is missing"
+            )
+
+        locked = strategy_input.get(
+            "locked",
+            {},
+        )
+
+        if not isinstance(
+            locked,
+            dict,
+        ):
+            raise TitleStrategyError(
+                "title_strategy_input.locked must be a dictionary"
+            )
+
+        locked_identity = locked.get(
+            "identity",
+            {},
+        )
+
+        if not isinstance(
+            locked_identity,
+            dict,
+        ):
+            raise TitleStrategyError(
+                "title_strategy_input.locked.identity must be a dictionary"
+            )
+
+        locked_identity_text = str(
+            locked_identity.get(
+                "text",
+                "",
+            )
+            or
+            ""
+        ).strip()
+
+        if not locked_identity_text:
+            raise TitleStrategyError(
+                "title_strategy_input.locked.identity.text is missing"
+            )
+
+        # =================================================
+        # Strategy Payload
+        #
+        # 不直接修改 profile["title_strategy_input"]。
+        # 创建发送给 AI 的独立副本，并添加标题策略约束。
+        # =================================================
+
+        strategy_payload = dict(
+            strategy_input
+        )
+
+        strategy_payload[
+            "title_constraints"
+        ] = {
+            "marketplace":
+                "Amazon",
+
+            "max_title_length":
+                75,
+
+            "objective":
+                "maximize purchase-relevant information within the title limit",
+        }
+
+        def _request_once():
+            return client.chat.completions.create(
+                model=model,
+
+            messages=[
+                {
+                    "role":
+                        "system",
+
+                    "content":
+                        TITLE_STRATEGY_SYSTEM_PROMPT,
+                },
+
+                {
+                    "role":
+                        "user",
+
+                    "content":
+                        json.dumps(
+                            strategy_payload,
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                },
+            ],
+
+            response_format={
+                "type":
+                    "json_object"
+            },
+            )
+
+        response = execute_with_retry(
+            _request_once,
+            stage="title_strategy",
+        )
+
+        try:
+            result = json.loads(
+                response.choices[0]
+                .message
+                .content
+            )
+
+            result = (
+                TitleStrategyGenerator
+                .normalize_strategy_result(
+                    result
+                )
+            )
+
+            # =============================================
+            # V3.2 Core Budget Validator + Targeted Repair
+            #
+            # Normal products do NOT make another AI call.
+            # Only unresolved protected-core cases enter this path.
+            # =============================================
+
+            result = (
+                TitleStrategyGenerator
+                .repair_core_overflow_if_needed(
+                    result=result,
+                    client=client,
+                    model=model,
+                )
+            )
+
+            return result
+
+        except Exception as exc:
+            raise TitleStrategyError(
+                f"Title strategy parse failed: {exc}"
+            )
 
 
-        candidates = title_strategy.get(
+    @staticmethod
+    def _candidate_shortest_text(
+        candidate: dict,
+    ) -> str:
+
+        if not isinstance(
+            candidate,
+            dict,
+        ):
+            return ""
+
+        full_text = str(
+            candidate.get(
+                "text",
+                "",
+            )
+            or
+            ""
+        ).strip()
+
+        short_text = str(
+            candidate.get(
+                "short_text",
+                "",
+            )
+            or
+            ""
+        ).strip()
+
+        if (
+            short_text
+            and
+            len(short_text)
+            <
+            len(full_text)
+        ):
+            return short_text
+
+        return full_text
+
+
+    @staticmethod
+    def _current_protected_candidates(
+        result: dict,
+    ) -> list:
+
+        candidates = result.get(
             "title_candidates",
             [],
         )
-
-
-        # =================================================
-        # 2. V3 Schema保护
-        #
-        # 不再静默回退到：
-        #
-        # must_include
-        # optional_include
-        # model_priority
-        # compatibility_priority
-        #
-        # 否则旧Generator逻辑会重新进入主链路。
-        # =================================================
 
         if not isinstance(
             candidates,
             list,
         ):
+            return []
 
-            candidates = []
+        protected = []
 
+        for candidate in candidates:
 
-        if not candidates:
-
-            raise ValueError(
-                "TitleGenerator V3 requires title_strategy.title_candidates"
-            )
-
-
-        # =================================================
-        # 3. 输出容器
-        # =================================================
-
-        title_parts = []
-
-        accepted_candidates = []
-
-        rejected_candidates = []
-
-        selected_models = []
-
-        removed_models = []
-
-
-        # =================================================
-        # 4. 结构级文本标准化
-        #
-        # 注意：
-        #
-        #这里只处理空格。
-        #
-        # 不修改：
-        # 大小写
-        # 型号
-        # 数字
-        # 规格
-        # 品牌
-        # 连字符
-        #
-        # Candidate text 已经应该是可直接用于标题的文本。
-        # =================================================
-
-        def normalize_text(
-            value,
-        ):
-
-            if value is None:
-
-                return ""
-
-
-            text = str(
-                value
-            ).strip()
-
-
-            text = re.sub(
-                r"\s+",
-                " ",
-                text,
-            )
-
-
-            return text
-
-
-        # =================================================
-        # 5. 精确去重
-        #
-        # Generator只判断：
-        #
-        # 文本是否完全重复。
-        #
-        # 不做语义推断。
-        #
-        # 语义重复应由Strategy层解决。
-        # =================================================
-
-        def already_exists(
-            text,
-        ):
-
-            normalized = (
-                normalize_text(
-                    text
-                )
-                .casefold()
-            )
-
-
-            if not normalized:
-
-                return True
-
-
-            for existing in title_parts:
-
-                if (
-                    normalize_text(
-                        existing
-                    )
-                    .casefold()
-                    ==
-                    normalized
-                ):
-
-                    return True
-
-
-            return False
-
-
-        # =================================================
-        # 6. 当前标题字符数
-        # =================================================
-
-        def current_title():
-
-            return " ".join(
-                normalize_text(
-                    part
-                )
-                for part in title_parts
-                if normalize_text(
-                    part
-                )
-            )
-
-        def candidate_should_skip(
-            candidate,
-        ):
-            """
-            Candidate Selection Gate
-
-            目的：
-            过滤低增量、高重复信息。
-
-            不重新理解产品。
-            只使用 Strategy 已经提供的数据。
-            """
-
-         
             if not isinstance(
                 candidate,
                 dict,
             ):
-                return True
+                continue
 
+            if not bool(
+                candidate.get(
+                    "required",
+                    False,
+                )
+            ):
+                continue
 
             candidate_type = str(
                 candidate.get(
@@ -499,332 +286,1961 @@ class TitleGenerator:
                 ""
             ).upper()
 
+            # Single-unit quantity is not a protected title prefix.
+            if candidate_type == "QUANTITY":
+
+                quantity_text = str(
+                    candidate.get(
+                        "text",
+                        "",
+                    )
+                    or
+                    ""
+                ).strip()
+
+                match = __import__(
+                    "re"
+                ).match(
+                    r"^\\s*(\\d+)\\b",
+                    quantity_text,
+                )
+
+                if match:
+
+                    try:
+                        if int(
+                            match.group(1)
+                        ) <= 1:
+                            continue
+                    except Exception:
+                        pass
+
+            protected.append(
+                candidate
+            )
+
+        return protected
+
+
+    @staticmethod
+    def _protected_bundle_length(
+        result: dict,
+    ) -> int:
+
+        parts = [
+            TitleStrategyGenerator
+            ._candidate_shortest_text(
+                candidate
+            )
+            for candidate
+            in TitleStrategyGenerator
+            ._current_protected_candidates(
+                result
+            )
+        ]
+
+        parts = [
+            part
+            for part in parts
+            if part
+        ]
+
+        return len(
+            " ".join(
+                parts
+            )
+        )
+
+
+    @staticmethod
+    def _identity_short_is_structurally_safe(
+        full_text: str,
+        short_text: str,
+    ) -> bool:
+        """
+        Conservative deterministic guard.
+
+        The repair model may REMOVE words from the locked identity,
+        but it may not invent a different product expression here.
+
+        This is intentionally strict:
+        - short must actually be shorter
+        - at least 2 tokens for multi-word identities
+        - every significant short token must already exist in full identity
+        - final head token should be preserved
+        """
+
+        full_text = str(
+            full_text
+            or
+            ""
+        ).strip()
+
+        short_text = str(
+            short_text
+            or
+            ""
+        ).strip()
+
+        if not full_text or not short_text:
+            return False
+
+        if len(short_text) >= len(full_text):
+            return False
+
+        token_pattern = __import__(
+            "re"
+        ).compile(
+            r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)*"
+        )
+
+        full_tokens = [
+            token.casefold()
+            for token in token_pattern.findall(
+                full_text
+            )
+        ]
+
+        short_tokens = [
+            token.casefold()
+            for token in token_pattern.findall(
+                short_text
+            )
+        ]
+
+        if not short_tokens:
+            return False
+
+        if (
+            len(full_tokens) > 1
+            and
+            len(short_tokens) < 2
+        ):
+            return False
+
+        full_token_set = set(
+            full_tokens
+        )
+
+        if any(
+            token
+            not in full_token_set
+            for token in short_tokens
+        ):
+            return False
+
+        # Preserve the final product-head token when possible.
+        if (
+            full_tokens
+            and
+            short_tokens
+            and
+            full_tokens[-1]
+            !=
+            short_tokens[-1]
+        ):
+            return False
+
+        return True
+
+
+    @staticmethod
+    def _compatibility_short_is_structurally_safe(
+        full_text: str,
+        short_text: str,
+    ) -> bool:
+        """
+        Compatibility repair may shorten a long compatible-brand list,
+        but it may never invent a brand and must keep the explicit
+        'Compatible with' qualifier.
+        """
+
+        full_text = str(
+            full_text
+            or
+            ""
+        ).strip()
+
+        short_text = str(
+            short_text
+            or
+            ""
+        ).strip()
+
+        if not full_text or not short_text:
+            return False
+
+        if len(short_text) >= len(full_text):
+            return False
+
+        required_prefix = "compatible with "
+
+        if not short_text.casefold().startswith(
+            required_prefix
+        ):
+            return False
+
+        short_body = short_text[
+            len(
+                "Compatible with "
+            ):
+        ].strip()
+
+        if not short_body:
+            return False
+
+        # Split common multi-brand separators and verify every retained
+        # brand/model fragment came from the original compatibility phrase.
+        fragments = [
+            fragment.strip()
+            for fragment in __import__(
+                "re"
+            ).split(
+                r"[,;/|]+",
+                short_body,
+            )
+            if fragment.strip()
+        ]
+
+        full_fold = full_text.casefold()
+
+        if not fragments:
+            return False
+
+        return all(
+            fragment.casefold()
+            in full_fold
+            for fragment in fragments
+        )
+
+
+    @staticmethod
+    def _classify_core_overflow(
+        result: dict,
+    ) -> str:
+
+        protected = (
+            TitleStrategyGenerator
+            ._current_protected_candidates(
+                result
+            )
+        )
+
+        if not protected:
+            return "none"
+
+        identity = next(
+            (
+                candidate
+                for candidate in protected
+                if str(
+                    candidate.get(
+                        "type",
+                        "",
+                    )
+                    or
+                    ""
+                ).upper()
+                ==
+                "IDENTITY"
+            ),
+            None,
+        )
+
+        compatibility = next(
+            (
+                candidate
+                for candidate in protected
+                if str(
+                    candidate.get(
+                        "type",
+                        "",
+                    )
+                    or
+                    ""
+                ).upper()
+                ==
+                "COMPATIBILITY"
+            ),
+            None,
+        )
+
+        models = [
+            candidate
+            for candidate in protected
+            if str(
+                candidate.get(
+                    "type",
+                    "",
+                )
+                or
+                ""
+            ).upper()
+            in {
+                "MODEL",
+                "PART_NUMBER",
+            }
+        ]
+
+        total = (
+            TitleStrategyGenerator
+            ._protected_bundle_length(
+                result
+            )
+        )
+
+        if total <= 75:
+            return "none"
+
+        identity_text = (
+            TitleStrategyGenerator
+            ._candidate_shortest_text(
+                identity
+            )
+            if identity
+            else
+            ""
+        )
+
+        compatibility_text = (
+            TitleStrategyGenerator
+            ._candidate_shortest_text(
+                compatibility
+            )
+            if compatibility
+            else
+            ""
+        )
+
+        identity_compatibility_length = len(
+            " ".join(
+                part
+                for part in [
+                    identity_text,
+                    compatibility_text,
+                ]
+                if part
+            )
+        )
+
+        if (
+            compatibility_text
+            and
+            len(compatibility_text)
+            >= 45
+        ):
+            return "compatibility_overflow"
+
+        if (
+            identity_text
+            and
+            len(identity_text)
+            >= 30
+        ):
+            return "identity_overflow"
+
+        if len(models) > 1:
+            return "model_overflow"
+
+        if identity_compatibility_length > 75:
+            return "identity_compatibility_overflow"
+
+        return "mixed_core_overflow"
+
+
+    @staticmethod
+    def repair_core_overflow_if_needed(
+        result: dict,
+        client,
+        model: str,
+    ) -> dict:
+        """
+        V3.4 Joint Core Budget + Two-Pass Targeted Repair.
+
+        Root-cause fix for V3.3:
+        V3.3 calculated an independent maximum for IDENTITY while keeping
+        COMPATIBILITY full, and vice versa. In mixed long-core cases this
+        could produce impossible limits (for example identity_max=1 or
+        compatibility_max=2), even though shortening BOTH fields together
+        could safely fit the protected core.
+
+        V3.4 therefore budgets the flexible core jointly:
+            IDENTITY + COMPATIBILITY <= shared flexible budget
+
+        Quantity / model / part number remain immutable.
+        """
+
+        if not isinstance(result, dict):
+            return result
+
+        required_budget = result.get("required_budget", {})
+        if not isinstance(required_budget, dict):
+            required_budget = {}
+            result["required_budget"] = required_budget
+
+        def _protected():
+            return (
+                TitleStrategyGenerator
+                ._current_protected_candidates(result)
+            )
+
+        def _bundle_length():
+            return (
+                TitleStrategyGenerator
+                ._protected_bundle_length(result)
+            )
+
+        def _candidate_of_type(type_name: str):
+            for candidate in result.get("title_candidates", []):
+                if (
+                    isinstance(candidate, dict)
+                    and bool(candidate.get("required", False))
+                    and str(candidate.get("type", "") or "").upper()
+                    == type_name
+                ):
+                    return candidate
+            return None
+
+        def _fixed_candidates():
+            return [
+                candidate
+                for candidate in _protected()
+                if str(candidate.get("type", "") or "").upper()
+                not in {"IDENTITY", "COMPATIBILITY"}
+            ]
+
+        def _effective(candidate):
+            if not isinstance(candidate, dict):
+                return ""
+            return (
+                TitleStrategyGenerator
+                ._candidate_shortest_text(candidate)
+            )
+
+        def _shared_flexible_budget():
+            """
+            Maximum total characters available to:
+                IDENTITY + COMPATIBILITY
+            including the one space between them when both are present.
+            """
+            fixed_parts = [
+                _effective(candidate)
+                for candidate in _fixed_candidates()
+                if _effective(candidate)
+            ]
+
+            fixed_length = len(" ".join(fixed_parts))
+
+            identity_exists = bool(_effective(identity))
+            compatibility_exists = bool(_effective(compatibility))
+            flexible_count = int(identity_exists) + int(compatibility_exists)
+
+            # Total separators in the final protected bundle:
+            # N parts -> N-1 spaces.
+            total_part_count = len(fixed_parts) + flexible_count
+            total_spaces = max(0, total_part_count - 1)
+
+            return max(
+                0,
+                75 - fixed_length - total_spaces,
+            )
+
+        def _flexible_length(
+            identity_text: str,
+            compatibility_text: str,
+        ) -> int:
+            return len(
+                " ".join(
+                    part
+                    for part in [
+                        str(identity_text or "").strip(),
+                        str(compatibility_text or "").strip(),
+                    ]
+                    if part
+                )
+            )
+
+        def _refresh_diagnostics():
+            current = _bundle_length()
+
+            required_budget["protected_bundle_length"] = current
+            required_budget["resolved"] = current <= 75
+            required_budget["overflow_type"] = (
+                TitleStrategyGenerator
+                ._classify_core_overflow(result)
+            )
+            required_budget["characters_over_budget"] = max(
+                0,
+                current - 75,
+            )
+
+            return current
+
+        current_length = _refresh_diagnostics()
+
+        required_budget.setdefault("repair_attempted", False)
+        required_budget.setdefault("repair_applied", False)
+        required_budget.setdefault("repair_type", "")
+        required_budget.setdefault("repair_reason", "")
+        required_budget["repair_passes"] = 0
+        required_budget["repair_history"] = []
+
+        if current_length <= 75:
+            return result
+
+        identity = _candidate_of_type("IDENTITY")
+        compatibility = _candidate_of_type("COMPATIBILITY")
+
+        original_identity_short = (
+            str(identity.get("short_text", "") or "").strip()
+            if identity
+            else ""
+        )
+        original_compatibility_short = (
+            str(compatibility.get("short_text", "") or "").strip()
+            if compatibility
+            else ""
+        )
+
+        any_safe_change = False
+        applied_identity = False
+        applied_compatibility = False
+        last_reason = ""
+
+        for repair_pass in (1, 2):
+
+            before_length = _refresh_diagnostics()
+
+            if before_length <= 75:
+                break
+
+            identity_current = _effective(identity)
+            compatibility_current = _effective(compatibility)
+
+            flexible_budget = _shared_flexible_budget()
+            current_flexible_length = _flexible_length(
+                identity_current,
+                compatibility_current,
+            )
+
+            required_reduction = max(
+                0,
+                current_flexible_length - flexible_budget,
+            )
+
+            repair_payload = {
+                "max_title_length": 75,
+                "repair_pass": repair_pass,
+                "overflow_type": required_budget.get(
+                    "overflow_type",
+                    "",
+                ),
+                "current_protected_bundle_length": before_length,
+                "characters_that_must_be_removed": max(
+                    0,
+                    before_length - 75,
+                ),
+                "joint_flexible_core": {
+                    "maximum_combined_characters":
+                        flexible_budget,
+                    "current_combined_characters":
+                        current_flexible_length,
+                    "minimum_characters_to_remove":
+                        required_reduction,
+                    "rule":
+                        (
+                            "identity_short_text plus compatibility_short_text "
+                            "including their separating space must fit this "
+                            "combined budget"
+                        ),
+                },
+                "identity": {
+                    "full_text": (
+                        str(identity.get("text", "") or "").strip()
+                        if identity else ""
+                    ),
+                    "current_effective_text": identity_current,
+                },
+                "compatibility": {
+                    "full_text": (
+                        str(compatibility.get("text", "") or "").strip()
+                        if compatibility else ""
+                    ),
+                    "current_effective_text": compatibility_current,
+                },
+                "immutable_core": [
+                    {
+                        "type": str(candidate.get("type", "") or ""),
+                        "text": _effective(candidate),
+                    }
+                    for candidate in _fixed_candidates()
+                ],
+            }
+
+            repair_prompt = """
+You repair ONLY an Amazon title protected-core overflow.
+
+Do not write a complete title.
+Do not reinterpret the product.
+Do not invent facts.
+
+V3.4 JOINT BUDGET RULE:
+IDENTITY and COMPATIBILITY are the only flexible protected fields.
+
+The payload gives:
+joint_flexible_core.maximum_combined_characters
+
+The combined output:
+    identity_short_text + one separating space + compatibility_short_text
+MUST be <= that exact combined character budget.
+
+This is a JOINT limit. You may shorten one field, both fields, or keep one
+unchanged, whichever preserves the most semantic/search value.
+
+PRIORITY OF INFORMATION:
+1. Keep the product physically identifiable.
+2. Keep explicit "Compatible with" wording if compatibility exists.
+3. Keep the highest-value compatible brand(s).
+4. Quantity, model numbers and part numbers in immutable_core cannot change.
+
+IDENTITY:
+- Preserve the same physical product type.
+- Remove redundant generic context, duplicate nouns, optional modifiers,
+  or non-essential application wording.
+- Do not collapse to a vague category.
+- Prefer words already present in the original identity.
+- For kit/assembly/set products, preserve the fact that it is a kit,
+  assembly or set when that changes what is sold.
+
+COMPATIBILITY:
+- Keep the exact prefix "Compatible with".
+- A long multi-brand list may be reduced to the highest-value one or two
+  brands when necessary.
+- Every retained brand must already occur in the original compatibility.
+- Never invent a brand.
+
+Return JSON only:
+{
+  "safe": true,
+  "identity_short_text": "",
+  "compatibility_short_text": "",
+  "repair_type": "identity|compatibility|identity_and_compatibility|none",
+  "reason": ""
+}
+
+If the joint numeric budget cannot be met safely, return safe=false.
+"""
+
+            def _repair_once():
+                return client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": repair_prompt,
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                repair_payload,
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                        },
+                    ],
+                    response_format={"type": "json_object"},
+                )
+
+            required_budget["repair_attempted"] = True
+            required_budget["repair_passes"] = repair_pass
+
+            try:
+                repair_response = execute_with_retry(
+                    _repair_once,
+                    stage=(
+                        "title_strategy_core_joint_repair_"
+                        f"pass_{repair_pass}"
+                    ),
+                )
+
+                repair_result = json.loads(
+                    repair_response.choices[0].message.content
+                )
+
+            except Exception as exc:
+                last_reason = (
+                    f"repair_pass_{repair_pass}_call_failed: {exc}"
+                )
+                required_budget["repair_history"].append(
+                    {
+                        "pass": repair_pass,
+                        "before_length": before_length,
+                        "applied": False,
+                        "reason": last_reason,
+                    }
+                )
+                continue
+
+            if not isinstance(repair_result, dict):
+                last_reason = (
+                    f"repair_pass_{repair_pass}_result_not_dict"
+                )
+                required_budget["repair_history"].append(
+                    {
+                        "pass": repair_pass,
+                        "before_length": before_length,
+                        "applied": False,
+                        "reason": last_reason,
+                    }
+                )
+                continue
+
+            if not bool(repair_result.get("safe", False)):
+                last_reason = str(
+                    repair_result.get(
+                        "reason",
+                        f"repair_pass_{repair_pass}_no_safe_repair",
+                    )
+                    or
+                    f"repair_pass_{repair_pass}_no_safe_repair"
+                )
+                required_budget["repair_history"].append(
+                    {
+                        "pass": repair_pass,
+                        "before_length": before_length,
+                        "joint_budget": flexible_budget,
+                        "applied": False,
+                        "reason": last_reason,
+                    }
+                )
+                continue
+
+            proposed_identity = str(
+                repair_result.get(
+                    "identity_short_text",
+                    "",
+                )
+                or
+                ""
+            ).strip()
+
+            proposed_compatibility = str(
+                repair_result.get(
+                    "compatibility_short_text",
+                    "",
+                )
+                or
+                ""
+            ).strip()
+
+            # Blank means "keep the current effective text".
+            candidate_identity = (
+                proposed_identity
+                or identity_current
+            )
+            candidate_compatibility = (
+                proposed_compatibility
+                or compatibility_current
+            )
+
+            identity_safe = True
+            compatibility_safe = True
+
+            if (
+                identity
+                and
+                proposed_identity
+                and
+                proposed_identity != identity_current
+            ):
+                identity_safe = (
+                    TitleStrategyGenerator
+                    ._identity_short_is_structurally_safe(
+                        str(identity.get("text", "") or ""),
+                        proposed_identity,
+                    )
+                )
+
+            if (
+                compatibility
+                and
+                proposed_compatibility
+                and
+                proposed_compatibility != compatibility_current
+            ):
+                compatibility_safe = (
+                    TitleStrategyGenerator
+                    ._compatibility_short_is_structurally_safe(
+                        str(compatibility.get("text", "") or ""),
+                        proposed_compatibility,
+                    )
+                )
+
+            joint_length = _flexible_length(
+                candidate_identity,
+                candidate_compatibility,
+            )
+
+            joint_budget_ok = (
+                joint_length <= flexible_budget
+            )
+
+            pass_identity_applied = False
+            pass_compatibility_applied = False
+
+            # Apply only when the WHOLE proposed flexible core is safe
+            # and satisfies the shared character budget.
+            if (
+                identity_safe
+                and compatibility_safe
+                and joint_budget_ok
+            ):
+                if (
+                    identity
+                    and
+                    proposed_identity
+                    and
+                    proposed_identity != identity_current
+                ):
+                    identity["short_text"] = proposed_identity
+                    pass_identity_applied = True
+                    applied_identity = True
+                    any_safe_change = True
+
+                if (
+                    compatibility
+                    and
+                    proposed_compatibility
+                    and
+                    proposed_compatibility != compatibility_current
+                ):
+                    compatibility["short_text"] = proposed_compatibility
+                    pass_compatibility_applied = True
+                    applied_compatibility = True
+                    any_safe_change = True
+
+            after_length = _refresh_diagnostics()
+
+            if not joint_budget_ok:
+                last_reason = (
+                    "proposal_exceeded_joint_flexible_budget"
+                )
+            elif not identity_safe:
+                last_reason = (
+                    "proposal_failed_identity_safety_guard"
+                )
+            elif not compatibility_safe:
+                last_reason = (
+                    "proposal_failed_compatibility_safety_guard"
+                )
+            else:
+                last_reason = str(
+                    repair_result.get("reason", "")
+                    or
+                    "joint_core_repair_applied"
+                )
+
+            required_budget["repair_history"].append(
+                {
+                    "pass": repair_pass,
+                    "before_length": before_length,
+                    "after_length": after_length,
+                    "characters_removed": max(
+                        0,
+                        before_length - after_length,
+                    ),
+                    "joint_flexible_budget":
+                        flexible_budget,
+                    "proposed_joint_length":
+                        joint_length,
+                    "identity_safe":
+                        identity_safe,
+                    "compatibility_safe":
+                        compatibility_safe,
+                    "joint_budget_ok":
+                        joint_budget_ok,
+                    "identity_applied":
+                        pass_identity_applied,
+                    "compatibility_applied":
+                        pass_compatibility_applied,
+                    "applied": (
+                        pass_identity_applied
+                        or
+                        pass_compatibility_applied
+                    ),
+                    "reason": last_reason,
+                }
+            )
+
+            if after_length <= 75:
+                break
+
+        final_length = _refresh_diagnostics()
+
+        if final_length <= 75:
+            required_budget["repair_applied"] = any_safe_change
+
+            if applied_identity and applied_compatibility:
+                required_budget["repair_type"] = (
+                    "identity_and_compatibility"
+                )
+            elif applied_identity:
+                required_budget["repair_type"] = "identity"
+            elif applied_compatibility:
+                required_budget["repair_type"] = "compatibility"
+            else:
+                required_budget["repair_type"] = ""
+
+            required_budget["repair_reason"] = (
+                last_reason
+                or
+                "protected_core_resolved"
+            )
+
+            return result
+
+        # Failed joint repair must never leave partial semantic edits behind.
+        if identity:
+            identity["short_text"] = original_identity_short
+
+        if compatibility:
+            compatibility["short_text"] = original_compatibility_short
+
+        _refresh_diagnostics()
+
+        required_budget["repair_applied"] = False
+        required_budget["repair_type"] = ""
+        required_budget["repair_reason"] = (
+            last_reason
+            or
+            "two_pass_joint_repair_did_not_resolve_75_char_budget"
+        )
+
+        return result
+
+
+    @staticmethod
+    def normalize_strategy_result(
+        result: dict,
+    ) -> dict:
+        """
+        对 Title Strategy AI 输出做结构标准化。
+
+        注意：
+
+        这里只做 Schema 保护。
+
+        不重新判断：
+        - 什么信息重要
+        - 什么是型号
+        - 什么是规格
+        - 什么应该进入标题
+
+        这些判断必须由 AI Strategy 完成。
+        """
+
+        if not isinstance(
+            result,
+            dict,
+        ):
+            raise TitleStrategyError(
+                "Title strategy result must be a dictionary"
+            )
+
+        # =============================================
+        # Legacy Fields
+        # =============================================
+
+        legacy_list_fields = [
+            "must_include",
+            "optional_include",
+            "exclude",
+            "model_priority",
+            "compatibility_priority",
+            "title_structure",
+            "priority_order",
+        ]
+
+        for field in legacy_list_fields:
+            value = result.get(
+                field,
+                []
+            )
+
+            if not isinstance(
+                value,
+                list,
+            ):
+                value = []
+
+            cleaned = []
+
+            for item in value:
+                text = str(
+                    item
+                ).strip()
+
+                if not text:
+                    continue
+
+                if text not in cleaned:
+                    cleaned.append(
+                        text
+                    )
+
+            result[
+                field
+            ] = cleaned
+
+        legacy_text_fields = [
+            "core_product",
+            "buyer_search_intent",
+            "title_length_strategy",
+            "reasoning",
+        ]
+
+        for field in legacy_text_fields:
+            value = result.get(
+                field,
+                ""
+            )
+
+            if value is None:
+                value = ""
+
+            result[
+                field
+            ] = str(
+                value
+            ).strip()
+
+        # =============================================
+        # Title Candidates
+        # =============================================
+
+        candidates = result.get(
+            "title_candidates",
+            []
+        )
+
+        if not isinstance(
+            candidates,
+            list,
+        ):
+            candidates = []
+
+        allowed_types = {
+            "IDENTITY",
+            "SECONDARY_IDENTITY",
+            "MODEL",
+            "PART_NUMBER",
+            "COMPATIBILITY",
+            "FEATURE",
+            "SPECIFICATION",
+            "QUANTITY",
+            "MATERIAL",
+            "USAGE",
+            "SEARCH_TERM",
+            "OTHER",
+        }
+
+        allowed_priorities = {
+            "S",
+            "A",
+            "B",
+            "C",
+            "D",
+        }
+
+        normalized_candidates = []
+        seen = set()
+
+        for candidate in candidates:
+
+            if not isinstance(
+                candidate,
+                dict,
+            ):
+                continue
+
+            text = str(
+                candidate.get(
+                    "text",
+                    ""
+                )
+            ).strip()
+
+            if not text:
+                continue
+
+            short_text = str(
+                candidate.get(
+                    "short_text",
+                    ""
+                )
+                or
+                ""
+            ).strip()
+
+            candidate_type = str(
+                candidate.get(
+                    "type",
+                    "OTHER"
+                )
+            ).strip().upper()
+
+            if (
+                candidate_type
+                not in allowed_types
+            ):
+                candidate_type = "OTHER"
+
+            priority = str(
+                candidate.get(
+                    "priority",
+                    "C"
+                )
+            ).strip().upper()
+
+            if (
+                priority
+                not in allowed_priorities
+            ):
+                priority = "C"
+
+            raw_scores = candidate.get(
+                "scores",
+                {}
+            )
+
+            if not isinstance(
+                raw_scores,
+                dict,
+            ):
+                raw_scores = {}
+
+            def normalize_score(
+                value,
+            ) -> int:
+                """
+                Score Schema保护。
+
+                这里只负责：
+                - 转数字
+                - 限制0~100
+
+                不重新判断产品价值。
+                """
+
+                try:
+                    score_value = float(
+                        value
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    score_value = 0.0
+
+                score_value = max(
+                    0.0,
+                    min(
+                        100.0,
+                        score_value,
+                    ),
+                )
+
+                return int(
+                    round(
+                        score_value
+                    )
+                )
+
+            scores = {
+                "search_value":
+                    normalize_score(
+                        raw_scores.get(
+                            "search_value",
+                            0,
+                        )
+                    ),
+
+                "purchase_impact":
+                    normalize_score(
+                        raw_scores.get(
+                            "purchase_impact",
+                            0,
+                        )
+                    ),
+
+                "identity_value":
+                    normalize_score(
+                        raw_scores.get(
+                            "identity_value",
+                            0,
+                        )
+                    ),
+
+                "differentiation_value":
+                    normalize_score(
+                        raw_scores.get(
+                            "differentiation_value",
+                            0,
+                        )
+                    ),
+
+                "character_efficiency":
+                    normalize_score(
+                        raw_scores.get(
+                            "character_efficiency",
+                            0,
+                        )
+                    ),
+            }
+
+            final_score = round(
+                (
+                    scores[
+                        "search_value"
+                    ]
+                    * 0.30
+                )
+                +
+                (
+                    scores[
+                        "purchase_impact"
+                    ]
+                    * 0.25
+                )
+                +
+                (
+                    scores[
+                        "identity_value"
+                    ]
+                    * 0.20
+                )
+                +
+                (
+                    scores[
+                        "differentiation_value"
+                    ]
+                    * 0.15
+                )
+                +
+                (
+                    scores[
+                        "character_efficiency"
+                    ]
+                    * 0.10
+                ),
+                1,
+            )
+
+            raw_incremental = candidate.get(
+                "incremental_value",
+                None,
+            )
+
+            has_incremental = isinstance(
+                raw_incremental,
+                dict,
+            )
+
+            if not has_incremental:
+                raw_incremental = {}
+
+            incremental_value = {
+                "new_information":
+                    normalize_score(
+                        raw_incremental.get(
+                            "new_information",
+                            0,
+                        )
+                    ),
+
+                "redundancy_penalty":
+                    normalize_score(
+                        raw_incremental.get(
+                            "redundancy_penalty",
+                            0,
+                        )
+                    ),
+
+                "selection_value":
+                    normalize_score(
+                        raw_incremental.get(
+                            "selection_value",
+                            0,
+                        )
+                    ),
+            }
+
+            if has_incremental:
+
+                incremental_modifier = (
+                    incremental_value[
+                        "new_information"
+                    ]
+                    * 0.50
+                    +
+                    incremental_value[
+                        "selection_value"
+                    ]
+                    * 0.30
+                    +
+                    (
+                        100
+                        -
+                        incremental_value[
+                            "redundancy_penalty"
+                        ]
+                    )
+                    * 0.20
+                )
+
+                adjusted_score = round(
+                    final_score
+                    *
+                    (
+                        0.50
+                        +
+                        (
+                            incremental_modifier
+                            / 200.0
+                        )
+                    ),
+                    1,
+                )
+
+            else:
+                incremental_modifier = 100.0
+                adjusted_score = final_score
 
             required = candidate.get(
                 "required",
-                False,
+                False
+            )
+
+            if not isinstance(
+                required,
+                bool,
+            ):
+                required = False
+
+            reason = str(
+                candidate.get(
+                    "reason",
+                    ""
+                )
+                or
+                ""
+            ).strip()
+
+            duplicate_key = (
+                text.casefold()
+            )
+
+            if duplicate_key in seen:
+                continue
+
+            seen.add(
+                duplicate_key
+            )
+
+            normalized_candidates.append(
+                {
+                    "text":
+                        text,
+
+                    "short_text":
+                        short_text,
+
+                    "type":
+                        candidate_type,
+
+                    "priority":
+                        priority,
+
+                    "scores":
+                        scores,
+
+                    "final_score":
+                        final_score,
+
+                    "incremental_value":
+                        incremental_value,
+
+                    "incremental_modifier":
+                        round(
+                            incremental_modifier,
+                            1,
+                        ),
+
+                    "adjusted_score":
+                        adjusted_score,
+
+                    "required":
+                        required,
+
+                    "reason":
+                        reason,
+                }
+            )
+        # =============================================
+        # V3.0 Required Budget Arbitration
+        #
+        # Root cause:
+        # The AI may mark too many FEATURE / SPECIFICATION / MATERIAL /
+        # COLOR candidates as required. If every "required" flag is treated
+        # as untouchable, the protected bundle itself can exceed 75 chars.
+        #
+        # Rule:
+        # 1. Never demote IDENTITY.
+        # 2. Never demote COMPATIBILITY.
+        # 3. Never demote multi-unit QUANTITY.
+        # 4. Protect up to the two strongest required MODEL/PART_NUMBER
+        #    candidates.
+        # 5. Other AI-required candidates remain required only while the
+        #    shortest safe protected bundle fits within 75 characters.
+        # 6. When the bundle is too long, demote the lowest marginal-value
+        #    non-core required candidate to optional and repeat.
+        #
+        # This is NOT semantic rewriting. It only resolves conflicts between
+        # AI "required" flags under the fixed 75-character title budget.
+        # =============================================
+
+        def candidate_shortest_text(
+            candidate,
+        ):
+
+            full_text = str(
+                candidate.get(
+                    "text",
+                    ""
+                )
+                or
+                ""
+            ).strip()
+
+            short_text = str(
+                candidate.get(
+                    "short_text",
+                    ""
+                )
+                or
+                ""
+            ).strip()
+
+            if (
+                short_text
+                and
+                len(short_text)
+                <
+                len(full_text)
+            ):
+                return short_text
+
+            return full_text
+
+
+        def bundle_length(
+            bundle,
+        ):
+
+            parts = [
+                candidate_shortest_text(
+                    candidate
+                )
+                for candidate in bundle
+            ]
+
+            parts = [
+                part
+                for part in parts
+                if part
+            ]
+
+            return len(
+                " ".join(
+                    parts
+                )
             )
 
 
-            # Identity 永远保留
-            if candidate_type == "IDENTITY":
-                return False
+        def parse_quantity_count(
+            candidate,
+        ):
+            """
+            Extract a leading package count from a QUANTITY candidate.
+
+            Examples:
+            "10 PCS" -> 10
+            "5 pcs" -> 5
+            "1 Piece" -> 1
+
+            Returns None when no trustworthy leading integer exists.
+            """
+
+            if not isinstance(
+                candidate,
+                dict,
+            ):
+                return None
+
+            if str(
+                candidate.get(
+                    "type",
+                    "",
+                )
+                or
+                ""
+            ).upper() != "QUANTITY":
+                return None
+
+            quantity_text = str(
+                candidate.get(
+                    "text",
+                    "",
+                )
+                or
+                ""
+            ).strip()
+
+            match = __import__(
+                "re"
+            ).match(
+                r"^\\s*(\\d+)\\b",
+                quantity_text,
+            )
+
+            if not match:
+                return None
+
+            try:
+                return int(
+                    match.group(1)
+                )
+            except Exception:
+                return None
 
 
-            # required 信息暂不自动过滤
-            # 避免误删型号、兼容信息
-            if required:
-                return False
+        # Preserve the AI decision for diagnostics.
+        for candidate in normalized_candidates:
 
+            candidate[
+                "required_by_ai"
+            ] = bool(
+                candidate.get(
+                    "required",
+                    False
+                )
+            )
+
+            candidate[
+                "required_budget_demoted"
+            ] = False
+
+
+        # Single-unit quantity does not belong in the title prefix and
+        # therefore must not consume protected-core budget.
+        for candidate in normalized_candidates:
+
+            if str(
+                candidate.get(
+                    "type",
+                    "",
+                )
+                or
+                ""
+            ).upper() != "QUANTITY":
+                continue
+
+            quantity_count = parse_quantity_count(
+                candidate
+            )
+
+            if quantity_count == 1:
+
+                candidate[
+                    "required"
+                ] = False
+
+                candidate[
+                    "required_budget_demoted"
+                ] = True
+
+                candidate[
+                    "required_budget_reason"
+                ] = (
+                    "single_unit_quantity_not_title_prefix"
+                )
+
+
+        fixed_required = []
+        model_required = []
+        flexible_required = []
+
+        for candidate in normalized_candidates:
+
+            if not candidate.get(
+                "required",
+                False
+            ):
+                continue
+
+            candidate_type = str(
+                candidate.get(
+                    "type",
+                    ""
+                )
+                or
+                ""
+            ).upper()
+
+            if candidate_type in {
+                "IDENTITY",
+                "COMPATIBILITY",
+                "QUANTITY",
+            }:
+                fixed_required.append(
+                    candidate
+                )
+                continue
+
+            if candidate_type in {
+                "MODEL",
+                "PART_NUMBER",
+            }:
+                model_required.append(
+                    candidate
+                )
+                continue
+
+            flexible_required.append(
+                candidate
+            )
+
+
+        def required_value_key(
+            candidate,
+        ):
+
+            try:
+                adjusted_score = float(
+                    candidate.get(
+                        "adjusted_score",
+                        0
+                    )
+                    or
+                    0
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                adjusted_score = 0.0
 
             incremental = candidate.get(
                 "incremental_value",
-                {},
+                {}
             )
-
 
             if not isinstance(
                 incremental,
                 dict,
             ):
-                return False
-
-
-            new_information = incremental.get(
-                "new_information",
-                100,
-            )
-
-            redundancy_penalty = incremental.get(
-                "redundancy_penalty",
-                0,
-            )
-
-            selection_value = incremental.get(
-                "selection_value",
-                0,
-            )
-
+                incremental = {}
 
             try:
-                new_information = int(
-                    new_information
+                selection_value = float(
+                    incremental.get(
+                        "selection_value",
+                        0
+                    )
+                    or
+                    0
                 )
-
-            except:
-                new_information = 100
-
-
-            try:
-                redundancy_penalty = int(
-                    redundancy_penalty
-                )
-
-            except:
-                redundancy_penalty = 0
-
-
-            try:
-                selection_value = int(
-                    selection_value
-                )
-
-            except:
-                selection_value = 0
-
-
-            # ==========================================
-            # Gate Rule
-            #
-            # 高重复 + 低新增
-            # 且不是选择关键
-            #
-            # 直接跳过
-            # ==========================================
-
-            if (
-                new_information < 30
-                and
-                redundancy_penalty > 70
-                and
-                selection_value < 50
+            except (
+                TypeError,
+                ValueError,
             ):
-                return True
+                selection_value = 0.0
+
+            try:
+                new_information = float(
+                    incremental.get(
+                        "new_information",
+                        0
+                    )
+                    or
+                    0
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                new_information = 0.0
+
+            length_cost = max(
+                1,
+                len(
+                    candidate_shortest_text(
+                        candidate
+                    )
+                )
+            )
+
+            # Higher = more valuable per character.
+            efficiency = (
+                adjusted_score
+                * 0.50
+                +
+                selection_value
+                * 0.30
+                +
+                new_information
+                * 0.20
+            ) / length_cost
+
+            return (
+                efficiency,
+                adjusted_score,
+                selection_value,
+                new_information,
+            )
 
 
-            return False
-        # =================================================
-        # 7. Package Quantity Fixed Prefix
+        # Protect at most the two strongest AI-required models/parts.
+        model_required.sort(
+            key=required_value_key,
+            reverse=True,
+        )
+
+        protected_model_required = (
+            model_required[:2]
+        )
+
+        for candidate in model_required[2:]:
+
+            candidate[
+                "required"
+            ] = False
+
+            candidate[
+                "required_budget_demoted"
+            ] = True
+
+            candidate[
+                "required_budget_reason"
+            ] = (
+                "more_than_two_primary_model_or_part_candidates"
+            )
+
+
+        active_flexible_required = list(
+            flexible_required
+        )
+
+        protected_bundle = (
+            fixed_required
+            +
+            protected_model_required
+            +
+            active_flexible_required
+        )
+
+
+        # If the protected bundle is still too long, a second required
+        # MODEL/PART_NUMBER must not displace identity + compatibility +
+        # the strongest primary identifier.
         #
-        # QUANTITY 是固定标题前缀，
-        # 不参与 Strategy Candidate 的预算竞争顺序。
-        #
-        # 规则：
-        #
-        # QUANTITY + IDENTITY + ...
-        #
-        # Strategy 仍负责判断什么是真实数量。
-        # Generator 不重新识别数量。
-        # =================================================
-
-        quantity_candidate = None
-        quantity_index = None
-
-
-        for index, candidate in enumerate(
-            candidates
+        # This implements the established title rule:
+        # use one or two high-value models; the second model is conditional
+        # on remaining title space.
+        while (
+            bundle_length(
+                protected_bundle
+            )
+            >
+            75
+            and
+            len(
+                protected_model_required
+            )
+            >
+            1
         ):
 
-            if not isinstance(
-                candidate,
-                dict,
-            ):
-                continue
+            candidate_to_demote = (
+                protected_model_required.pop()
+            )
 
+            candidate_to_demote[
+                "required"
+            ] = False
 
-            candidate_type = normalize_text(
-                candidate.get(
-                    "type",
-                    "",
-                )
-            ).upper()
+            candidate_to_demote[
+                "required_budget_demoted"
+            ] = True
 
+            candidate_to_demote[
+                "required_budget_reason"
+            ] = (
+                "secondary_required_model_exceeds_core_budget"
+            )
 
-            if candidate_type != "QUANTITY":
-                continue
-
-
-            quantity_text = normalize_text(
-                candidate.get(
-                    "text",
-                    "",
-                )
+            protected_bundle = (
+                fixed_required
+                +
+                protected_model_required
+                +
+                active_flexible_required
             )
 
 
-            if not quantity_text:
-                continue
-
-            # =================================================
-            # V3.7.2 Single-unit Quantity Guard
-            #
-            # A quantity of 1 must NEVER consume title space.
-            # Handles noisy AI/source forms such as:
-            #   1pc / 1 pcs / 1 piece / 1x / 1x package quantity
-            #
-            # Multi-unit quantities remain fixed prefixes.
-            # =================================================
-
-            quantity_match = __import__("re").match(
-                r"^\s*(\d+)\s*(?:x|pc|pcs|piece|pieces)?\b",
-                quantity_text,
-                flags=__import__("re").IGNORECASE,
+        # Demote lowest marginal-value flexible required candidates until the
+        # shortest safe bundle fits. IDENTITY / COMPATIBILITY / QUANTITY and
+        # the strongest 1-2 model/part candidates remain protected.
+        while (
+            bundle_length(
+                protected_bundle
             )
-
-            if quantity_match:
-                try:
-                    quantity_value = int(quantity_match.group(1))
-                except (TypeError, ValueError):
-                    quantity_value = None
-
-                if quantity_value == 1:
-                    continue
-
-
-            quantity_candidate = candidate
-            quantity_index = index
-
-            # 正常情况下只允许一个有效的 QUANTITY Candidate
-            break
-
-
-        if quantity_candidate is not None:
-
-            quantity_text = normalize_text(
-                quantity_candidate.get(
-                    "text",
-                    "",
-                )
-            )
-
-            if quantity_text:
-
-                title_parts.append(
-                    quantity_text
-                )
-
-                accepted_candidates.append(
-                    {
-                        "index":
-                            quantity_index,
-
-                        "text":
-                            quantity_text,
-
-                        "short_text":
-                            normalize_text(
-                                quantity_candidate.get(
-                                    "short_text",
-                                    "",
-                                )
-                            ),
-
-                        "selected_text":
-                            quantity_text,
-
-                        "selected_source":
-                            "fixed_quantity_prefix",
-
-                        "type":
-                            "QUANTITY",
-
-                        "priority":
-                            normalize_text(
-                                quantity_candidate.get(
-                                    "priority",
-                                    "",
-                                )
-                            ).upper(),
-
-                        "required":
-                            True,
-
-                        "reason":
-                            "fixed_quantity_prefix",
-
-                        "character_count_after":
-                            len(
-                                current_title()
-                            ),
-                    }
-                )
-        # =================================================
-        # 7. 逐个执行 title_candidates
-        #
-        # 极其重要：
-        #
-        # 不排序。
-        #
-        # Strategy已经按标题价值排序。
-        #
-        # Generator只执行这个顺序。
-        # =================================================
-
-        for index, candidate in enumerate(
-            candidates
+            >
+            75
+            and
+            active_flexible_required
         ):
 
-                        # ---------------------------------------------
-            # Candidate必须是dict
-            # ---------------------------------------------
+            candidate_to_demote = min(
+                active_flexible_required,
+                key=required_value_key,
+            )
 
-            if not isinstance(
-                candidate,
-                dict,
-            ):
+            candidate_to_demote[
+                "required"
+            ] = False
 
-                rejected_candidates.append(
-                    {
-                        "index":
-                            index,
+            candidate_to_demote[
+                "required_budget_demoted"
+            ] = True
 
-                        "reason":
-                            "invalid_candidate",
+            candidate_to_demote[
+                "required_budget_reason"
+            ] = (
+                "protected_required_bundle_exceeds_75"
+            )
 
-                        "candidate":
-                            candidate,
-                    }
-                )
+            active_flexible_required.remove(
+                candidate_to_demote
+            )
 
-                continue
-
-
-            # ---------------------------------------------
-            # QUANTITY 已经作为固定前缀处理
-            #
-            # 所有 QUANTITY Candidate 都不能再次进入
-            # 普通标题候选流程，否则数量会重复。
-            # ---------------------------------------------
-
-            candidate_type_for_skip = normalize_text(
-                candidate.get(
-                    "type",
-                    "",
-                )
-            ).upper()
-
-
-            if candidate_type_for_skip == "QUANTITY":
-                continue
-            # ---------------------------------------------
-            # 读取Schema字段
-            # ---------------------------------------------
-
-            text = normalize_text(
-                candidate.get(
-                    "text",
-                    "",
-                )
+            protected_bundle = (
+                fixed_required
+                +
+                protected_model_required
+                +
+                active_flexible_required
             )
 
 
-            candidate_type = normalize_text(
-                candidate.get(
+        required_budget_summary = {
+            "protected_bundle_length":
+                bundle_length(
+                    protected_bundle
+                ),
+            "ai_required_count":
+                sum(
+                    1
+                    for candidate
+                    in normalized_candidates
+                    if candidate.get(
+                        "required_by_ai",
+                        False
+                    )
+                ),
+            "final_required_count":
+                sum(
+                    1
+                    for candidate
+                    in normalized_candidates
+                    if candidate.get(
+                        "required",
+                        False
+                    )
+                ),
+            "demoted_count":
+                sum(
+                    1
+                    for candidate
+                    in normalized_candidates
+                    if candidate.get(
+                        "required_budget_demoted",
+                        False
+                    )
+                ),
+            "resolved":
+                bundle_length(
+                    protected_bundle
+                )
+                <=
+                75,
+
+            "repair_attempted":
+                False,
+
+            "repair_applied":
+                False,
+
+            "repair_type":
+                "",
+
+            "repair_reason":
+                "",
+        }
+
+
+        # =============================================
+        # Candidate Final Ordering
+        #
+        # Title Strategy AI 负责：
+        # - 语义判断
+        # - priority
+        # - required
+        # - incremental value
+        #
+        # Normalizer 负责：
+        # - final_score
+        # - adjusted_score
+        # - 将这些确定性结果转化为最终候选顺序
+        #
+        # TitleGenerator 不再重新排序。
+        # =============================================
+
+        priority_rank = {
+            "S": 0,
+            "A": 1,
+            "B": 2,
+            "C": 3,
+            "D": 4,
+        }
+
+
+        def candidate_sort_key(
+            item,
+        ):
+
+            candidate_type = str(
+                item.get(
                     "type",
                     "OTHER",
                 )
+                or
+                "OTHER"
             ).upper()
 
 
-            priority = normalize_text(
-                candidate.get(
-                    "priority",
-                    "C",
-                )
-            ).upper()
-
-
-            required = candidate.get(
+            required = item.get(
                 "required",
                 False,
             )
@@ -834,817 +2250,169 @@ class TitleGenerator:
                 required,
                 bool,
             ):
-
                 required = False
 
 
-            # =================================================
-            # V3.1 Candidate Budget Engine
+            try:
+
+                adjusted_score = float(
+                    item.get(
+                        "adjusted_score",
+                        0,
+                    )
+                    or
+                    0
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                adjusted_score = 0.0
+
+
+            priority = str(
+                item.get(
+                    "priority",
+                    "D",
+                )
+                or
+                "D"
+            ).upper()
+
+
+            # =========================================
+            # Group 0
             #
-            # Strategy 已经负责：
-            # - text
-            # - short_text
-            # - priority
-            # - required
-            # - candidate ordering
+            # Primary required identity
             #
-            # Generator 这里只负责：
+            # 必须永远位于标题最前面。
+            # =========================================
+
+            if (
+                candidate_type
+                ==
+                "IDENTITY"
+                and
+                required
+            ):
+
+                group = 0
+
+
+            # =========================================
+            # Group 1
             #
-            # 1. 尝试完整 text
-            # 2. 完整 text 放不下时尝试 short_text
-            # 3. 两者都放不下时 STOP
+            # Compatibility brand is protected ahead
+            # of optional secondary identity/context.
+            # =========================================
+
+            elif candidate_type == "COMPATIBILITY":
+
+                group = 1
+
+
+            # =========================================
+            # Group 2
             #
-            # Generator 不创建 short_text，
-            # 也不重新理解产品。
-            # =================================================
+            # AI-selected primary model / part number.
+            # Strategy marks only the strongest 1-2 as
+            # required when their selection value is high.
+            # =========================================
 
-            budget_result = (
-                CandidateBudgetEngine
-                .choose_candidate_text(
-                    parts=title_parts,
-                    candidate=candidate,
-                    max_length=75,
-                )
-            )
-
-
-            accepted = bool(
-                budget_result.get(
-                    "accepted",
-                    False,
-                )
-            )
-
-
-            selected_text = normalize_text(
-                budget_result.get(
-                    "selected_text",
-                    "",
-                )
-            )
-
-
-            selected_source = normalize_text(
-                budget_result.get(
-                    "source",
-                    "",
-                )
-            )
-
-
-            budget_reason = normalize_text(
-                budget_result.get(
-                    "reason",
-                    "",
-                )
-            )
-
-
-            # =================================================
-            # Candidate 被接受
-            # =================================================
-
-            if accepted and selected_text:
-
-                title_parts.append(
-                    selected_text
-                )
-
-
-                accepted_candidates.append(
-                    {
-                        "index":
-                            index,
-
-                        # Strategy 原始完整文本
-                        "text":
-                            text,
-
-                        # Strategy 提供的短文本
-                        "short_text":
-                            normalize_text(
-                                candidate.get(
-                                    "short_text",
-                                    "",
-                                )
-                            ),
-
-                        # 实际进入标题的文本
-                        "selected_text":
-                            selected_text,
-
-                        # text / short_text
-                        "selected_source":
-                            selected_source,
-
-                        "type":
-                            candidate_type,
-
-                        "priority":
-                            priority,
-
-                        "required":
-                            required,
-
-                        "reason":
-                            budget_reason,
-
-                        "character_count_after":
-                            budget_result.get(
-                                "character_count_after",
-                                len(
-                                    current_title()
-                                ),
-                            ),
-                    }
-                )
-
-
-                # -----------------------------------------
-                # 保留旧返回 Schema
-                #
-                # 不猜型号，
-                # 只使用 Strategy 已经给出的 type。
-                # -----------------------------------------
-
-                if candidate_type in {
+            elif (
+                candidate_type
+                in {
                     "MODEL",
                     "PART_NUMBER",
-                }:
+                }
+                and
+                required
+            ):
 
-                    selected_models.append(
-                        selected_text
-                    )
-
-
-                continue
+                group = 2
 
 
-            # =================================================
-            # Candidate 未接受
-            # =================================================
+            # =========================================
+            # Group 3
+            #
+            # Other high-value supporting information.
+            #
+            # SECONDARY_IDENTITY is deliberately NOT
+            # protected. It competes here by adjusted
+            # incremental value and character efficiency.
+            # This prevents a long/redundant secondary
+            # identity from displacing compatibility or
+            # primary models.
+            # =========================================
 
-            rejected_item = {
+            elif candidate_type not in {
+                "MODEL",
+                "PART_NUMBER",
+                "SEARCH_TERM",
+            }:
 
-                "index":
-                    index,
-
-                "text":
-                    text,
-
-                "short_text":
-                    normalize_text(
-                        candidate.get(
-                            "short_text",
-                            "",
-                        )
-                    ),
-
-                "type":
-                    candidate_type,
-
-                "priority":
-                    priority,
-
-                "required":
-                    required,
-
-                "reason":
-                    (
-                        budget_reason
-                        or
-                        "candidate_rejected"
-                    ),
-
-                "current_length":
-                    budget_result.get(
-                        "current_length",
-                        len(
-                            current_title()
-                        ),
-                    ),
-
-                "text_length":
-                    budget_result.get(
-                        "text_length",
-                        len(
-                            text
-                        ),
-                    ),
-
-                "short_text_length":
-                    budget_result.get(
-                        "short_text_length",
-                        len(
-                            normalize_text(
-                                candidate.get(
-                                    "short_text",
-                                    "",
-                                )
-                            )
-                        ),
-                    ),
-            }
+                group = 3
 
 
-            rejected_candidates.append(
-                rejected_item
-            )
+            # =========================================
+            # Group 4
+            #
+            # Completion models / part numbers.
+            # Used after stronger supporting facts.
+            # =========================================
 
-
-            # =================================================
-            # MODEL / PART_NUMBER 未进入标题
-            # =================================================
-
-            if candidate_type in {
+            elif candidate_type in {
                 "MODEL",
                 "PART_NUMBER",
             }:
 
-                removed_models.append(
-                    text
-                )
+                group = 4
 
 
-            # =================================================
-            # 非预算原因：
+            # =========================================
+            # Group 5
             #
-            # empty_text
-            # exact_duplicate
-            #
-            # 不应该阻止后续 Candidate。
-            # =================================================
-
-            if budget_reason in {
-                "empty_text",
-                "exact_duplicate",
-                "invalid_candidate",
-            }:
-
-                continue
-
-
-            # =================================================
-            # V3.2 Title Completion
-            #
-            # character_budget 不再意味着整个标题生成停止。
-            #
-            # Strategy 已经按价值排序。当前高价值 Candidate 如果
-            # 因为字符过长放不下，后面仍可能存在更短、但依然有
-            # 独立增量价值的 verified Candidate（型号、规格、材质等）。
-            #
-            # 因此：
-            # - 保留当前 Candidate 为 rejected
-            # - 继续按 Strategy 原顺序扫描后续 Candidate
-            # - 只有真实可放入 <=75 字符的 Candidate 才加入
-            #
-            # Generator 仍然：
-            # - 不重排
-            # - 不创造新事实
-            # - 不创建缩写
-            # - 不降低 75 字符上限
-            # =================================================
-
-            if budget_reason == "character_budget":
-
-                continue
-
-
-            # 未知拒绝原因采用保守策略：
-            # 当前 Candidate 不进入标题，但仍允许后续已经由
-            # Strategy 排序和验证过的 Candidate 参与剩余预算竞争。
-            continue
-
-
-        # =================================================
-        # 9. 构建最终标题
-        # =================================================
-
-        title = current_title()
-
-
-        # =================================================
-        # 10. 合规清理
-        #
-        # 保留已有blocked word机制。
-        # =================================================
-
-        title = (
-            TitleGenerator.clean_title(
-                title
-            )
-        )
-
-
-        # =================================================
-        # 11. 不再调用 format_title_case()
-        #
-        # 原因：
-        #
-        # Strategy candidate text 已经是可直接使用的文本。
-        #
-        # Generator再次capitalize会破坏：
-        # - 型号格式
-        # - 技术规格格式
-        # - 缩写格式
-        #
-        # V3保持Strategy提供的文本形式。
-        # =================================================
-
-
-        # =================================================
-        # 12. 最终长度保险
-        #
-        # 正常情况下绝不会超过75。
-        # 这里只防未来其他清理逻辑异常。
-        # =================================================
-
-        if len(
-            title
-        ) > 75:
-
-            title = (
-                TitleGenerator.limit_length(
-                    title,
-                    75,
-                )
-            )
-
-
-        # =================================================
-        # 13. 合规验证
-        # =================================================
-
-        blocked_words = (
-            TitleGenerator.check_blocked_words(
-                title
-            )
-        )
-
-
-        # =================================================
-        # 14. 返回
-        #
-        # 保留旧返回字段，
-        # 避免影响 batch_processor / export / preview。
-        #
-        # 同时增加V3调试字段。
-        # =================================================
-
-        return {
-
-            "title":
-                title,
-
-            "selected_models":
-                selected_models,
-
-            "removed_models":
-                removed_models,
-
-            "character_count":
-                len(
-                    title
-                ),
-
-            "validation":
-            {
-
-                "length_ok":
-                    len(
-                        title
-                    ) <= 75,
-
-                "compliance_ok":
-                    len(
-                        blocked_words
-                    ) == 0,
-
-            },
-
-            "blocked_words":
-                blocked_words,
-
-            "brand_check":
-                "passed",
-
-            # =============================================
-            # V3 Debug
-            # =============================================
-
-            "generator_version":
-                "V3.2-title-completion",
-
-            "budget_parts":
-                title_parts,
-
-            "accepted_candidates":
-                accepted_candidates,
-
-            "rejected_candidates":
-                rejected_candidates,
-
-            "budget_used":
-                len(
-                    title
-                ),
-
-            "budget_remaining":
-                max(
-                    0,
-                    75
-                    -
-                    len(
-                        title
-                    ),
-                ),
-        }
-
-    # =====================================================
-    # 语义重复检测
-    # 防止 Button / Cover / Shaver 等核心词重复
-    # =====================================================
-
-    @staticmethod
-    def has_semantic_overlap(
-        new_text,
-        existing_parts,
-    ):
-
-        if not new_text:
-            return False
-
-
-        if not existing_parts:
-            return False
-
-
-
-        def extract_words(text):
-
-            words = re.findall(
-                r"[a-zA-Z0-9]+",
-                str(text).lower()
-            )
-
-
-            ignore_words = {
-
-                "compatible",
-                "with",
-                "for",
-                "and",
-                "the",
-
-            }
-
-
-            result = set()
-
-
-            for word in words:
-
-                # 太短词忽略
-                if len(word) <= 2:
-                    continue
-
-
-                if word in ignore_words:
-                    continue
-
-
-                result.add(word)
-
-
-            return result
-
-
-
-        new_words = extract_words(
-            new_text
-        )
-
-
-        if not new_words:
-
-            return False
-
-
-
-        for old in existing_parts:
-
-
-            old_words = extract_words(
-                old
-            )
-
-
-            overlap = (
-                new_words
-                &
-                old_words
-            )
-
-
-            # 一个核心词重复即可认为可能重复
-            if overlap:
-
-                return True
-
-
-
-        return False
-    @staticmethod
-    def clean_title(
-        text: str,
-    ):
-
-        for word in TitleGenerator.BLOCKED_WORDS:
-
-            text = re.sub(
-
-                r"\b"
-                +
-                re.escape(word)
-                +
-                r"\b",
-
-                "",
-
-                text,
-
-                flags=re.I,
-
-            )
-
-
-        text = re.sub(
-
-            r"\s+",
-
-            " ",
-
-            text,
-
-        )
-
-
-        return text.strip()
-
-
-
-    @staticmethod
-    def format_title_case(
-        text: str,
-    ):
-
-        words = text.split()
-
-
-        small_words = [
-
-            "with",
-            "and",
-            "for",
-            "de",
-            "para",
-            "con",
-
-        ]
-
-
-        result = []
-
-
-        for index, word in enumerate(words):
-
-            if (
-                index > 0
-                and
-                word.lower()
-                in small_words
-            ):
-
-                result.append(
-                    word.lower()
-                )
+            # Remaining search/context completion.
+            # =========================================
 
             else:
 
-                result.append(
-                    word.capitalize()
-                )
+                group = 5
 
 
-        return " ".join(result)
+            return (
+                group,
 
-    @staticmethod
-    def compress_title_parts(
-        parts,
-        max_length=75,
-        priority_parts=None,
-    ):
+                # adjusted_score 是组内核心排序依据
+                -adjusted_score,
 
-        if len(
-            " ".join(parts)
-        ) <= max_length:
-
-            return parts
-
-
-
-        result = []
-
-
-        # 第一优先级：
-        # 产品身份
-
-        for part in parts:
-
-            if len(result) == 0:
-
-                result.append(
-                    part
-                )
-
-
-
-        # 第二优先级：
-        # 型号
-
-        for part in parts:
-
-            text = str(
-                part
+                # priority 只作为辅助排序
+                priority_rank.get(
+                    priority,
+                    99,
+                ),
             )
 
 
-            if re.search(
-                r"[A-Za-z]+\d+",
-                text
-            ):
+        normalized_candidates.sort(
+            key=candidate_sort_key
+        )
+        result[
+            "title_candidates"
+        ] = normalized_candidates
 
-                if text not in result:
+        # =============================================
+        # Schema Version
+        # =============================================
 
-                    result.append(
-                        text
-                    )
-        # 第三优先级：
-        # 标题高价值属性
+        result[
+            "required_budget"
+        ] = required_budget_summary
 
-        if priority_parts:
-
-            for part in priority_parts:
-
-                if part in parts:
-
-                    if part not in result:
-
-                        result.append(
-                            part
-                        )
-
-
-        # 第四优先级：
-        # Compatible with 品牌
-
-        for part in parts:
-
-            if "Compatible with" in str(part):
-
-                if part not in result:
-
-                    result.append(
-                        part
-                    )
-
-
-
-        # 第五优先级：
-        # 其他卖点
-
-        for part in parts:
-
-            if part not in result:
-
-                if len(
-                    " ".join(result+[part])
-                ) <= max_length:
-
-                    result.append(
-                        part
-                    )
-
-
+        result[
+            "schema_version"
+        ] = "3.4-joint-core-budget-two-pass-repair"
 
         return result
-    @staticmethod
-    def protect_compatibility_phrases(
-        parts
-    ):
-
-        protected = []
-
-        for part in parts:
-
-            text = str(part)
-
-            if text.startswith(
-                "Compatible with"
-            ):
-
-                protected.append(
-                    text.replace(
-                        " ",
-                        "_",
-                    )
-                )
-
-            else:
-
-                protected.append(
-                    text
-                )
-
-        return protected
-    @staticmethod
-    def limit_length(
-        text: str,
-        max_length: int = 75,
-    ):
-
-        if len(text) <= max_length:
-
-            return text
-
-
-        words = text.split()
-
-
-        result = []
-
-
-        length = 0
-
-
-        for word in words:
-
-            if (
-                length
-                +
-                len(word)
-                +
-                1
-                >
-                max_length
-            ):
-
-                break
-
-
-            result.append(
-                word
-            )
-
-
-            length += (
-                len(word)
-                +
-                1
-            )
-
-
-        return " ".join(result)
-
-
-
-    @staticmethod
-    def check_blocked_words(
-        text: str,
-    ):
-
-        found = []
-
-
-        for word in TitleGenerator.BLOCKED_WORDS:
-
-            if re.search(
-
-                r"\b"
-                +
-                re.escape(word)
-                +
-                r"\b",
-
-                text,
-
-                flags=re.I,
-
-            ):
-
-                found.append(
-                    word
-                )
-
-
-        return found
