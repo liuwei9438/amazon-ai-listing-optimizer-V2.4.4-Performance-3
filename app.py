@@ -840,16 +840,107 @@ with st.expander(
                     f"Title Strategy 测试失败：{exc}"
                 )
 
+# =====================================================
+# V2.4.4 Failure Observability
+#
+# A failed product must be visible as a terminal result.
+# Do not hide failure diagnostics inside profiles-only JSON.
+# =====================================================
+
+terminal_success = len(profiles)
+terminal_failed = len(failed_items)
+terminal_completed = terminal_success + terminal_failed
+
+if current_task:
+    current_status = load_status(current_task) or {}
+    expected_total = (
+        current_status.get("total")
+        or current_status.get("total_products")
+        or 0
+    )
+else:
+    current_status = {}
+    expected_total = 0
+
+if expected_total:
+    if terminal_completed == expected_total:
+        st.caption(
+            f"结果闭环：{terminal_success} 成功 + "
+            f"{terminal_failed} 失败 = {expected_total} 总数"
+        )
+    else:
+        st.error(
+            f"结果未闭环：成功 {terminal_success} + 失败 {terminal_failed} "
+            f"= {terminal_completed}，但任务总数为 {expected_total}。"
+        )
+
 if failed_items:
     with st.expander(
-        f"失败产品（{len(failed_items)}）",
-        expanded=False,
+        f"失败产品（{len(failed_items)}）— 点击查看真实错误",
+        expanded=True,
     ):
-        st.json(failed_items[:20])
-        if len(failed_items) > 20:
-            st.caption(
-                f"仅显示前 20 条；共 {len(failed_items)} 条失败记录。"
+        for failed_index, item in enumerate(failed_items, 1):
+            if not isinstance(item, dict):
+                st.error(f"失败记录 {failed_index}: {item}")
+                continue
+
+            row_index = item.get("source_row_index", "")
+            sku = item.get("sku", "")
+            title = item.get("title", "")
+            error_type = item.get("error_type", "")
+            error = item.get("error", "")
+            attempt = item.get("attempt", item.get("attempts", ""))
+            max_attempts = item.get("max_attempts", "")
+
+            st.markdown(
+                f"**失败 {failed_index}｜Excel 行：{row_index or '-'}｜"
+                f"SKU：{sku or '-'}**"
             )
+            if title:
+                st.caption(title)
+            st.code(
+                "\n".join(
+                    [
+                        f"error_type: {error_type or '-'}",
+                        f"error: {error or '-'}",
+                        (
+                            f"attempt: {attempt}/{max_attempts}"
+                            if max_attempts
+                            else f"attempts: {attempt or '-'}"
+                        ),
+                    ]
+                ),
+                language="text",
+            )
+
+        failure_report = {
+            "task_id": current_task,
+            "status": current_status,
+            "summary": {
+                "success": terminal_success,
+                "failed": terminal_failed,
+                "completed": terminal_completed,
+                "expected_total": expected_total,
+                "closed": (
+                    terminal_completed == expected_total
+                    if expected_total
+                    else None
+                ),
+            },
+            "failed_items": failed_items,
+        }
+
+        st.download_button(
+            "下载失败诊断 JSON",
+            data=json.dumps(
+                failure_report,
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8"),
+            file_name="failed_items_diagnostic.json",
+            mime="application/json",
+            key="download_failed_diagnostic_json",
+        )
 if profiles:
 
 
@@ -887,31 +978,60 @@ if profiles:
     # =================================================
 
 
+    # Profiles-only JSON is kept for backward compatibility.
     st.download_button(
 
         "下载 Product Profile JSON",
 
-
         data=json.dumps(
-
             profiles,
-
             ensure_ascii=False,
-
             indent=2,
-
         ).encode(
             "utf-8"
         ),
 
-
         file_name=
-        "product_profiles_v2.4.3.json",
-
+        "product_profiles_v2.4.4.json",
 
         mime=
         "application/json",
 
+    )
+
+
+    # Complete task diagnostic export:
+    # success + failed + task status.  This is the file to use when
+    # investigating any missing/failed product because profiles-only JSON
+    # intentionally contains successful profiles only.
+    complete_task_report = {
+        "task_id": current_task,
+        "status": current_status,
+        "summary": {
+            "success": len(profiles),
+            "failed": len(failed_items),
+            "completed": len(profiles) + len(failed_items),
+            "expected_total": expected_total,
+            "closed": (
+                len(profiles) + len(failed_items) == expected_total
+                if expected_total
+                else None
+            ),
+        },
+        "profiles": profiles,
+        "failed_items": failed_items,
+    }
+
+    st.download_button(
+        "下载完整任务诊断 JSON",
+        data=json.dumps(
+            complete_task_report,
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8"),
+        file_name="product_task_diagnostic_v2.4.4.json",
+        mime="application/json",
+        key="download_complete_task_diagnostic_json",
     )
 
 
