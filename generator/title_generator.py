@@ -1352,6 +1352,168 @@ class TitleGenerator:
 
 
         # =================================================
+        # 13.5 V3.9 Hard Title Constraint Validation
+        #
+        # Hard rules:
+        # - 61 <= title length <= 75
+        # - IDENTITY must be present
+        # - verified COMPATIBILITY must be present
+        #
+        # IMPORTANT:
+        # Generator never invents filler to reach 61 characters.
+        # If Strategy did not provide enough verified candidate content,
+        # validation fails explicitly so the upstream Candidate Pool can
+        # be improved instead of fabricating information.
+        # =================================================
+
+        identity_candidates = [
+            candidate
+            for candidate in candidates
+            if (
+                isinstance(candidate, dict)
+                and
+                normalize_text(
+                    candidate.get(
+                        "type",
+                        "",
+                    )
+                ).upper()
+                ==
+                "IDENTITY"
+            )
+        ]
+
+        compatibility_candidates = [
+            candidate
+            for candidate in candidates
+            if (
+                isinstance(candidate, dict)
+                and
+                normalize_text(
+                    candidate.get(
+                        "type",
+                        "",
+                    )
+                ).upper()
+                ==
+                "COMPATIBILITY"
+                and
+                normalize_text(
+                    candidate.get(
+                        "text",
+                        "",
+                    )
+                )
+            )
+        ]
+
+
+        def candidate_is_present(
+            candidate,
+        ):
+            if not isinstance(
+                candidate,
+                dict,
+            ):
+                return False
+
+            possible_texts = [
+                normalize_text(
+                    candidate.get(
+                        "text",
+                        "",
+                    )
+                ),
+                normalize_text(
+                    candidate.get(
+                        "short_text",
+                        "",
+                    )
+                ),
+            ]
+
+            title_fold = normalize_text(
+                title
+            ).casefold()
+
+            for possible_text in possible_texts:
+
+                if (
+                    possible_text
+                    and
+                    possible_text.casefold()
+                    in
+                    title_fold
+                ):
+                    return True
+
+            return False
+
+
+        identity_present = (
+            any(
+                candidate_is_present(
+                    candidate
+                )
+                for candidate
+                in identity_candidates
+            )
+            if identity_candidates
+            else False
+        )
+
+        compatibility_required = bool(
+            compatibility_candidates
+        )
+
+        compatibility_present = (
+            any(
+                candidate_is_present(
+                    candidate
+                )
+                for candidate
+                in compatibility_candidates
+            )
+            if compatibility_required
+            else True
+        )
+
+        min_length_ok = len(
+            title
+        ) >= 61
+
+        max_length_ok = len(
+            title
+        ) <= 75
+
+        hard_constraint_errors = []
+
+        if not min_length_ok:
+            hard_constraint_errors.append(
+                "title_below_61_characters"
+            )
+
+        if not max_length_ok:
+            hard_constraint_errors.append(
+                "title_above_75_characters"
+            )
+
+        if not identity_present:
+            hard_constraint_errors.append(
+                "identity_missing"
+            )
+
+        if (
+            compatibility_required
+            and
+            not compatibility_present
+        ):
+            hard_constraint_errors.append(
+                "compatibility_missing"
+            )
+
+
+        # =================================================
         # 14. 返回
         #
         # 保留旧返回字段，
@@ -1380,9 +1542,44 @@ class TitleGenerator:
             {
 
                 "length_ok":
+                    (
+                        len(
+                            title
+                        )
+                        >=
+                        61
+                        and
+                        len(
+                            title
+                        )
+                        <=
+                        75
+                    ),
+
+                "min_length_ok":
+                    min_length_ok,
+
+                "max_length_ok":
+                    max_length_ok,
+
+                "identity_present":
+                    identity_present,
+
+                "compatibility_required":
+                    compatibility_required,
+
+                "compatibility_present":
+                    compatibility_present,
+
+                "hard_constraints_ok":
                     len(
-                        title
-                    ) <= 75,
+                        hard_constraint_errors
+                    )
+                    ==
+                    0,
+
+                "hard_constraint_errors":
+                    hard_constraint_errors,
 
                 "compliance_ok":
                     len(
@@ -1402,7 +1599,7 @@ class TitleGenerator:
             # =============================================
 
             "generator_version":
-                "V3.8-strategy-execution-consistency",
+                "V3.9-hard-61-75-core-protection",
 
             "budget_parts":
                 title_parts,
