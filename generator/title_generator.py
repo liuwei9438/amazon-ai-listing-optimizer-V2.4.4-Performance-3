@@ -904,6 +904,172 @@ class TitleGenerator:
             )
 
 
+        def optional_value_metrics(
+            candidate,
+        ):
+            """
+            Generic value model for OPTIONAL title candidates.
+
+            No product-specific or candidate-type hardcoding is used here.
+            Strategy already supplied semantic scores; Generator only converts
+            them into a deterministic title-budget value.
+            """
+
+            try:
+                adjusted_score = float(
+                    candidate.get(
+                        "adjusted_score",
+                        candidate.get(
+                            "final_score",
+                            0,
+                        ),
+                    )
+                    or 0
+                )
+            except Exception:
+                adjusted_score = 0.0
+
+            incremental = candidate.get(
+                "incremental_value",
+                {},
+            )
+
+            if not isinstance(
+                incremental,
+                dict,
+            ):
+                incremental = {}
+
+            try:
+                selection_value = float(
+                    incremental.get(
+                        "selection_value",
+                        0,
+                    )
+                    or 0
+                )
+            except Exception:
+                selection_value = 0.0
+
+            try:
+                new_information = float(
+                    incremental.get(
+                        "new_information",
+                        0,
+                    )
+                    or 0
+                )
+            except Exception:
+                new_information = 0.0
+
+            try:
+                redundancy_penalty = float(
+                    incremental.get(
+                        "redundancy_penalty",
+                        0,
+                    )
+                    or 0
+                )
+            except Exception:
+                redundancy_penalty = 0.0
+
+            shortest_text = shortest_candidate_text(
+                candidate
+            )
+
+            character_cost = max(
+                1,
+                len(shortest_text),
+            )
+
+            # Absolute semantic value first.
+            # Character efficiency is a secondary signal, not the main score,
+            # so very short low-value tokens cannot automatically beat a much
+            # more valuable model/specification.
+            semantic_value = max(
+                0.0,
+                (
+                    adjusted_score
+                    * 0.55
+                    +
+                    selection_value
+                    * 0.25
+                    +
+                    new_information
+                    * 0.20
+                    -
+                    redundancy_penalty
+                    * 0.15
+                ),
+            )
+
+            value_density = (
+                semantic_value
+                /
+                character_cost
+            )
+
+            return {
+                "semantic_value":
+                    semantic_value,
+                "value_density":
+                    value_density,
+                "character_cost":
+                    character_cost,
+                "adjusted_score":
+                    adjusted_score,
+                "selection_value":
+                    selection_value,
+                "new_information":
+                    new_information,
+                "redundancy_penalty":
+                    redundancy_penalty,
+            }
+
+
+        def optional_value_sort_key(
+            item,
+        ):
+            """
+            Highest total value first, then value/character.
+            Original index is the final deterministic tie-breaker.
+            """
+
+            index, candidate = item
+
+            if not isinstance(
+                candidate,
+                dict,
+            ):
+                return (
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    -index,
+                )
+
+            metrics = optional_value_metrics(
+                candidate
+            )
+
+            return (
+                metrics[
+                    "semantic_value"
+                ],
+                metrics[
+                    "value_density"
+                ],
+                metrics[
+                    "selection_value"
+                ],
+                metrics[
+                    "adjusted_score"
+                ],
+                -index,
+            )
+
+
         for core_index, core_candidate in enumerate(
             candidates
         ):
@@ -1177,6 +1343,90 @@ class TitleGenerator:
             if item[0] not in protected_indexes
         ]
 
+        # =================================================
+        # V3.7 Optional Value Allocation
+        #
+        # Optional candidates compete for the remaining budget according
+        # to Strategy-supplied value signals instead of raw JSON order.
+        #
+        # This fixes cases where a low-value SECONDARY_IDENTITY / usage
+        # token appears earlier in the array and crowds out a substantially
+        # more valuable optional model or specification.
+        #
+        # IMPORTANT:
+        # This is not a new semantic understanding layer.
+        # Generator does not decide what the product is.
+        # It only allocates the remaining characters using scores already
+        # produced by Title Strategy.
+        # =================================================
+
+        remaining_candidates.sort(
+            key=optional_value_sort_key,
+            reverse=True,
+        )
+
+        optional_allocation_debug = []
+
+        for optional_index, optional_candidate in remaining_candidates:
+
+            if not isinstance(
+                optional_candidate,
+                dict,
+            ):
+                continue
+
+            metrics = optional_value_metrics(
+                optional_candidate
+            )
+
+            optional_allocation_debug.append(
+                {
+                    "index":
+                        optional_index,
+                    "text":
+                        normalize_text(
+                            optional_candidate.get(
+                                "text",
+                                "",
+                            )
+                        ),
+                    "type":
+                        normalize_text(
+                            optional_candidate.get(
+                                "type",
+                                "OTHER",
+                            )
+                        ).upper(),
+                    "semantic_value":
+                        round(
+                            metrics[
+                                "semantic_value"
+                            ],
+                            4,
+                        ),
+                    "value_density":
+                        round(
+                            metrics[
+                                "value_density"
+                            ],
+                            4,
+                        ),
+                    "character_cost":
+                        metrics[
+                            "character_cost"
+                        ],
+                    "selection_value":
+                        metrics[
+                            "selection_value"
+                        ],
+                    "adjusted_score":
+                        metrics[
+                            "adjusted_score"
+                        ],
+                }
+            )
+
+
         execution_candidates = (
             protected_identity
             +
@@ -1187,7 +1437,83 @@ class TitleGenerator:
             remaining_candidates
         )
 
+        core_overflow_mode = bool(
+            protected_core_unresolved
+        )
+
+        core_overflow_dropped_required = []
+
+        # Fail-closed priority lock:
+        # if a higher protected required item cannot fit, lower-priority
+        # items may not consume the remaining budget.
+        protected_priority_blocked = False
+        protected_priority_blocked_by = None
+
         for index, candidate in execution_candidates:
+
+            # =================================================
+            # V3.7.1 Core Overflow Priority Lock
+            # =================================================
+            if protected_priority_blocked:
+
+                if isinstance(
+                    candidate,
+                    dict,
+                ):
+                    blocked_text = normalize_text(
+                        candidate.get(
+                            "text",
+                            "",
+                        )
+                    )
+                    blocked_type = normalize_text(
+                        candidate.get(
+                            "type",
+                            "OTHER",
+                        )
+                    ).upper()
+                    blocked_priority = normalize_text(
+                        candidate.get(
+                            "priority",
+                            "C",
+                        )
+                    ).upper()
+                    blocked_required = bool(
+                        candidate.get(
+                            "required",
+                            False,
+                        )
+                    )
+                else:
+                    blocked_text = ""
+                    blocked_type = "OTHER"
+                    blocked_priority = "C"
+                    blocked_required = False
+
+                rejected_candidates.append(
+                    {
+                        "index":
+                            index,
+                        "text":
+                            blocked_text,
+                        "type":
+                            blocked_type,
+                        "priority":
+                            blocked_priority,
+                        "required":
+                            blocked_required,
+                        "reason":
+                            "blocked_by_higher_priority_core_overflow",
+                        "blocked_by":
+                            protected_priority_blocked_by,
+                        "current_length":
+                            len(
+                                current_title()
+                            ),
+                    }
+                )
+
+                continue
 
                         # ---------------------------------------------
             # Candidate必须是dict
@@ -1497,6 +1823,39 @@ class TitleGenerator:
             # Candidate 未接受
             # =================================================
 
+            if (
+                core_overflow_mode
+                and
+                required
+            ):
+                dropped_required_item = {
+                    "index":
+                        index,
+                    "text":
+                        text,
+                    "type":
+                        candidate_type,
+                    "priority":
+                        priority,
+                    "reason":
+                        "required_candidate_did_not_fit_75",
+                }
+
+                core_overflow_dropped_required.append(
+                    dropped_required_item
+                )
+
+                protected_priority_blocked = True
+                protected_priority_blocked_by = {
+                    "index":
+                        index,
+                    "text":
+                        text,
+                    "type":
+                        candidate_type,
+                }
+
+
             rejected_item = {
 
                 "index":
@@ -1746,7 +2105,7 @@ class TitleGenerator:
             # =============================================
 
             "generator_version":
-                "V3.6-required-candidate-protection",
+                "V3.7.1-optional-value-allocation-priority-lock",
 
             "budget_parts":
                 title_parts,
@@ -1773,7 +2132,40 @@ class TitleGenerator:
                 ),
 
             "protected_core":
-                protected_core_debug,
+                {
+                    **protected_core_debug,
+
+                    # Strategy-level result:
+                    # Can every protected required item fit in its shortest
+                    # safe representation?
+                    "strategy_bundle_resolved":
+                        not core_overflow_mode,
+
+                    # Execution-level result:
+                    # Did Generator have to drop any required item to stay
+                    # within the 75-character hard limit?
+                    "execution_resolved":
+                        len(
+                            core_overflow_dropped_required
+                        )
+                        ==
+                        0,
+
+                    "core_overflow_mode":
+                        core_overflow_mode,
+
+                    "dropped_required":
+                        core_overflow_dropped_required,
+
+                    "priority_lock_triggered":
+                        protected_priority_blocked,
+
+                    "priority_lock_blocked_by":
+                        protected_priority_blocked_by,
+                },
+
+            "optional_allocation":
+                optional_allocation_debug,
         }
 
     # =====================================================
