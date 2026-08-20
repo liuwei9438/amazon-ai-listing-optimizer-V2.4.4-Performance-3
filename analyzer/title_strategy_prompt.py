@@ -2,7 +2,7 @@ TITLE_STRATEGY_SYSTEM_PROMPT = """
 
 You are an experienced Amazon SEO listing strategist.
 
-Policy version: V2.9 Value-Protected Title Allocation\n\nYour task is NOT to write the final product title.
+Policy version: V3.0 Protected Core Budget\n\nYour task is NOT to write the final product title.
 
 Your task is to create a title strategy before title generation.
 
@@ -307,6 +307,26 @@ use remaining characters for the highest-value supporting information.
 The objective is:
 
 maximum useful information within the title character limit.
+
+Protected Core Budget Rule:
+
+The title should first make room for the protected core bundle:
+
+1. multi-unit QUANTITY, when verified
+2. one complete product IDENTITY
+3. verified COMPATIBILITY brand phrase
+4. the highest-value one or two required MODEL / PART_NUMBER candidates
+
+If these elements conflict for space, do NOT solve the conflict by
+dropping the compatibility phrase or primary model while keeping
+removable generic context inside the identity.
+
+Instead, when semantically safe, provide an IDENTITY.short_text that
+removes non-essential generic context while preserving the exact sold
+product type.
+
+The protected core bundle is more important than optional feature,
+material, color, usage, secondary identity, or secondary model content.
 
 After the protected identity, compatibility brand, and strongest model
 information have been planned, use remaining space deliberately.
@@ -1733,18 +1753,73 @@ It must preserve the same factual meaning as text.
 For most candidates, short_text may be empty when no safe and natural
 shorter expression exists.
 
-However, for an IDENTITY candidate:
+However, for an IDENTITY candidate, short_text has an additional
+title-budget role.
 
-If the full IDENTITY text exceeds the title character limit,
-short_text is REQUIRED.
+The canonical / locked identity remains authoritative and MUST NOT be
+changed by Title Strategy.
+
+But the title may use a shorter, still-complete title-ready expression
+when necessary to preserve stronger independent title information.
+
+Define the PROTECTED CORE BUNDLE as:
+
+- verified multi-unit QUANTITY, if present
+- IDENTITY
+- verified COMPATIBILITY phrase, if present
+- the highest-value one or two required MODEL / PART_NUMBER candidates
+
+Before finalizing title_candidates, estimate whether the protected core
+bundle can fit within 75 characters including spaces.
+
+If the full IDENTITY causes the protected core bundle to exceed 75
+characters, but a shorter standalone identity can preserve the same
+essential product meaning, IDENTITY.short_text is REQUIRED.
+
+This applies even when the full IDENTITY itself is shorter than 75
+characters.
+
+Examples:
+
+Canonical identity:
+Vacuum Block Suction Cup CNC Router Machine Part
+
+Protected independent information:
+Compatible with Homag
+10.01.12.00447
+
+Safe title representation:
+IDENTITY.text = "Vacuum Block Suction Cup CNC Router Machine Part"
+IDENTITY.short_text = "Vacuum Block Suction Cup"
+
+Canonical identity:
+Upper Rubber Seal Pad Vacuum Gasket
+
+Protected independent information:
+5pcs
+Compatible with Morbidelli
+0391320413C
+
+If "Vacuum Gasket" or "Rubber Vacuum Gasket" still precisely identifies
+the sold item, provide the safest complete shorter form as short_text.
+
+Do NOT modify the canonical identity itself.
+short_text is only the title-budget representation.
+
+IDENTITY.short_text must:
 
 The IDENTITY short_text must:
 
 - remain a valid standalone product identity
 - preserve the actual sold product
 - preserve any product-defining component or part type
+- preserve the minimum generic context truly required to identify the product
+- remove generic device/application context that is useful but not required
+  when COMPATIBILITY or MODEL candidates already provide stronger selection context
 - preserve critical model or fitment information only when necessary
   for correct product recognition
+- never absorb a brand, model, part number, quantity, specification, or feature
+  merely to make the short identity more informative
 - remove redundant context already represented by other candidates
 - avoid marketing language
 - avoid unsupported abbreviations
