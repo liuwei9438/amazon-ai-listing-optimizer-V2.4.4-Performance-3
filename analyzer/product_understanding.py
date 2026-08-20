@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from services import (
@@ -131,6 +132,13 @@ class ProductUnderstandingEngine:
         )
 
 
+        # =================================================
+        # Understanding Recovery
+        # =================================================
+
+        profile = self._recover_missing_product_type(
+            profile
+        )
 
 
         # =================================================
@@ -303,6 +311,186 @@ class ProductUnderstandingEngine:
 
         return profile
 
+
+
+    # =====================================================
+    # Understanding Identity Recovery
+    # =====================================================
+
+    @staticmethod
+    def _recover_missing_product_type(
+        profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Recover a missing basic_info.product_type from already
+        identified, source-grounded product identity fields.
+
+        Root cause:
+        the first AI understanding call can occasionally identify the
+        product correctly in product_identity / basic_info.product_name
+        while leaving basic_info.product_type empty.  The previous validator
+        treated that single blank field as a fatal product-level failure.
+
+        Recovery order intentionally uses only fields already returned by
+        the understanding stage; it does not invent a category or infer from
+        arbitrary numbers/specifications.
+        """
+
+        if not isinstance(profile, dict):
+            return profile
+
+        basic = profile.setdefault(
+            "basic_info",
+            {},
+        )
+
+        if not isinstance(basic, dict):
+            basic = {}
+            profile["basic_info"] = basic
+
+        current_type = str(
+            basic.get("product_type")
+            or ""
+        ).strip()
+
+        if current_type:
+            return profile
+
+        product_identity = profile.get(
+            "product_identity",
+            {},
+        )
+
+        if not isinstance(product_identity, dict):
+            product_identity = {}
+
+        candidates = [
+            basic.get("product_name"),
+            product_identity.get("name"),
+            product_identity.get("title_product_identity"),
+            product_identity.get("buyer_search_identity"),
+        ]
+
+        recovered = ""
+
+        for value in candidates:
+            value = str(value or "").strip()
+            if value:
+                recovered = value
+                break
+
+        if not recovered:
+            return profile
+
+        basic["product_type"] = recovered
+
+        # Keep product_name populated as well when the AI returned identity
+        # fields but omitted the mirrored basic_info name.
+        if not str(basic.get("product_name") or "").strip():
+            basic["product_name"] = recovered
+
+        profile.setdefault(
+            "understanding_recovery",
+            {},
+        )
+
+        # product_profile_schema has additionalProperties=False for the AI
+        # response, but this metadata is added only after schema parsing.  It
+        # is useful in diagnostics and ignored by downstream knowledge code.
+        profile["understanding_recovery"] = {
+            "product_type_recovered": True,
+            "recovered_product_type": recovered,
+            "source": "existing_identity_field",
+        }
+
+        return profile
+
+
+    # =====================================================
+    # Contextual Numeric Model Recovery
+    # =====================================================
+
+    @staticmethod
+    def _recover_numeric_compatibility_models(
+        title: str,
+        candidates: list[str],
+        already_models: list[str],
+    ) -> list[str]:
+        """
+        Recover source-supported bare numeric model numbers when the AI
+        classifier is overly conservative.
+
+        This is intentionally NOT "numbers = models".
+
+        Recovery requires all of the following:
+        1. The value is a bare 3-6 digit token.
+        2. It appears in the source title.
+        3. It appears inside a compatibility/model zone introduced by
+           wording such as "for", "compatible with", or "fits".
+        4. At least two such numeric candidates occur in that same zone.
+
+        This handles real compatibility lists such as:
+            "... OPC Drum for Canon iR 2520 2525 2530 2535 ..."
+        while avoiding quantities, dimensions, voltage, power, and short
+        family codes such as "34 35" that occur outside the compatibility
+        zone.
+        """
+
+        title = str(title or "").strip()
+        if not title:
+            return list(already_models or [])
+
+        lowered = title.casefold()
+
+        # Use the LAST compatibility introducer. Product names/specifications
+        # commonly appear earlier, while the fitment list normally follows it.
+        cue_matches = list(
+            re.finditer(
+                r"\b(?:compatible\s+with|fits?|for)\b",
+                lowered,
+                flags=re.IGNORECASE,
+            )
+        )
+
+        if not cue_matches:
+            return list(already_models or [])
+
+        zone_start = cue_matches[-1].end()
+        compatibility_zone = title[zone_start:]
+
+        numeric_candidates: list[str] = []
+
+        for raw in candidates:
+            value = str(raw or "").strip()
+
+            # Bare numeric device models are normally 3-6 digits.
+            # Units/quantities such as 10pcs, 60V, 30MM, 1-3cm do not match.
+            if not re.fullmatch(r"\d{3,6}", value):
+                continue
+
+            if not re.search(
+                rf"(?<!\w){re.escape(value)}(?!\w)",
+                compatibility_zone,
+                flags=re.IGNORECASE,
+            ):
+                continue
+
+            numeric_candidates.append(value)
+
+        # A single bare number remains ambiguous; let the AI classification
+        # stand. A sequence of 2+ values is strong compatibility-list evidence.
+        if len(numeric_candidates) < 2:
+            return list(already_models or [])
+
+        recovered = list(already_models or [])
+        seen = {str(x).casefold() for x in recovered if x}
+
+        for value in numeric_candidates:
+            key = value.casefold()
+            if key not in seen:
+                recovered.append(value)
+                seen.add(key)
+
+        return recovered
 
 
     # =====================================================
@@ -551,6 +739,26 @@ class ProductUnderstandingEngine:
 
                 )
 
+
+
+        # =====================================================
+        # V1.3 Contextual Recovery
+        #
+        # Some valid device models are bare numbers. Even with the full title,
+        # the AI classifier may conservatively return them as unknown.
+        # Recover only numeric sequences that are source-supported and located
+        # inside a clear compatibility zone.
+        # =====================================================
+
+        model_values = self._recover_numeric_compatibility_models(
+            getattr(
+                record,
+                "title",
+                ""
+            ),
+            candidates,
+            model_values,
+        )
 
 
         # 保留 AI 原始结果中未被否定的信息
