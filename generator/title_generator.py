@@ -593,6 +593,41 @@ class TitleGenerator:
 
 
             return False
+        def compact_quantity_text(
+            text,
+        ):
+            """
+            Normalize explicit package counts into the shortest stable form.
+
+            Examples:
+            10 Pieces -> 10pcs
+            5 pieces  -> 5pcs
+            3 PCS     -> 3pcs
+            2 pc      -> 2pcs
+
+            Only package-count units are normalized. Technical units and
+            specifications are left untouched.
+            """
+
+            value = normalize_text(
+                text
+            )
+
+            if not value:
+                return ""
+
+            match = re.fullmatch(
+                r"(\d+)\s*(?:pc|pcs|piece|pieces|unit|units|count|counts|ct)",
+                value,
+                flags=re.IGNORECASE,
+            )
+
+            if not match:
+                return value
+
+            return f"{int(match.group(1))}pcs"
+
+
         def is_single_unit_quantity(
             text,
         ):
@@ -685,10 +720,19 @@ class TitleGenerator:
 
         if quantity_candidate is not None:
 
-            quantity_text = normalize_text(
-                quantity_candidate.get(
-                    "text",
-                    "",
+            quantity_text = compact_quantity_text(
+                normalize_text(
+                    quantity_candidate.get(
+                        "short_text",
+                        "",
+                    )
+                )
+                or
+                normalize_text(
+                    quantity_candidate.get(
+                        "text",
+                        "",
+                    )
                 )
             )
 
@@ -750,20 +794,77 @@ class TitleGenerator:
                     }
                 )
         # =================================================
-        # 7. 逐个执行 title_candidates
+        # 8. Value-Protected Execution Order
         #
-        # 极其重要：
+        # Quantity is already handled as the fixed prefix.
         #
-        # 不排序。
+        # Generator protects the two title elements that must not be crowded
+        # out by optional information:
+        #   1. Primary IDENTITY
+        #   2. COMPATIBILITY brand phrase
         #
-        # Strategy已经按标题价值排序。
-        #
-        # Generator只执行这个顺序。
+        # All remaining candidates keep their original Strategy order.
+        # This is not a new semantic ranking layer; it only reserves title
+        # budget for the already-defined protected elements.
         # =================================================
 
-        for index, candidate in enumerate(
-            candidates
-        ):
+        indexed_candidates = list(
+            enumerate(
+                candidates
+            )
+        )
+
+        protected_identity = [
+            item
+            for item in indexed_candidates
+            if normalize_text(
+                (
+                    item[1].get("type", "")
+                    if isinstance(item[1], dict)
+                    else ""
+                )
+            ).upper()
+            == "IDENTITY"
+        ]
+
+        protected_compatibility = [
+            item
+            for item in indexed_candidates
+            if normalize_text(
+                (
+                    item[1].get("type", "")
+                    if isinstance(item[1], dict)
+                    else ""
+                )
+            ).upper()
+            == "COMPATIBILITY"
+        ]
+
+        protected_indexes = {
+            index
+            for index, _ in (
+                protected_identity
+                +
+                protected_compatibility
+            )
+        }
+
+        remaining_candidates = [
+            item
+            for item in indexed_candidates
+            if item[0] not in protected_indexes
+        ]
+
+        execution_candidates = (
+            protected_identity
+            +
+            protected_compatibility
+            +
+            remaining_candidates
+        )
+
+
+        for index, candidate in execution_candidates:
 
                         # ---------------------------------------------
             # Candidate必须是dict
@@ -1244,7 +1345,7 @@ class TitleGenerator:
             # =============================================
 
             "generator_version":
-                "V3.3-value-protected-completion",
+                "V3.4-compact-quantity-protected-compatibility",
 
             "budget_parts":
                 title_parts,
