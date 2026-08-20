@@ -794,6 +794,157 @@ class TitleGenerator:
                     }
                 )
         # =================================================
+        # 7.5 Protected Core Bundle Planner
+        #
+        # Generator never invents a shorter identity.
+        # It may only choose Strategy-provided IDENTITY.short_text.
+        #
+        # Protected core:
+        #   Quantity (>1) + Identity + Compatibility
+        #   + first 1-2 required MODEL/PART_NUMBER candidates.
+        # =================================================
+
+        def joined_length(
+            parts,
+        ):
+            return len(
+                " ".join(
+                    normalize_text(part)
+                    for part in parts
+                    if normalize_text(part)
+                )
+            )
+
+
+        def shortest_candidate_text(
+            candidate,
+        ):
+            if not isinstance(candidate, dict):
+                return ""
+
+            full_text = normalize_text(
+                candidate.get("text", "")
+            )
+            short_text = normalize_text(
+                candidate.get("short_text", "")
+            )
+
+            if short_text and len(short_text) < len(full_text):
+                return short_text
+
+            return full_text
+
+
+        identity_candidate = None
+        compatibility_core = []
+        required_model_core = []
+
+        for core_candidate in candidates:
+
+            if not isinstance(core_candidate, dict):
+                continue
+
+            core_type = normalize_text(
+                core_candidate.get("type", "")
+            ).upper()
+
+            if core_type == "IDENTITY" and identity_candidate is None:
+                identity_candidate = core_candidate
+                continue
+
+            if core_type == "COMPATIBILITY":
+                compatibility_core.append(core_candidate)
+                continue
+
+            if (
+                core_type in {"MODEL", "PART_NUMBER"}
+                and bool(core_candidate.get("required", False))
+                and len(required_model_core) < 2
+            ):
+                required_model_core.append(core_candidate)
+
+
+        force_identity_short = False
+        protected_core_unresolved = False
+
+        protected_core_debug = {
+            "full_identity_bundle_length": None,
+            "short_identity_bundle_length": None,
+            "identity_short_forced": False,
+            "protected_model_count": len(required_model_core),
+            "resolved": True,
+        }
+
+
+        if identity_candidate is not None:
+
+            identity_full = normalize_text(
+                identity_candidate.get("text", "")
+            )
+            identity_short = normalize_text(
+                identity_candidate.get("short_text", "")
+            )
+
+            protected_tail = []
+
+            for protected_candidate in (
+                compatibility_core + required_model_core
+            ):
+                protected_text = shortest_candidate_text(
+                    protected_candidate
+                )
+                if protected_text:
+                    protected_tail.append(protected_text)
+
+            full_bundle = (
+                list(title_parts)
+                + [identity_full]
+                + protected_tail
+            )
+
+            full_bundle_length = joined_length(full_bundle)
+
+            protected_core_debug[
+                "full_identity_bundle_length"
+            ] = full_bundle_length
+
+            if full_bundle_length > 75:
+
+                if (
+                    identity_short
+                    and identity_short.casefold()
+                    != identity_full.casefold()
+                ):
+                    short_bundle = (
+                        list(title_parts)
+                        + [identity_short]
+                        + protected_tail
+                    )
+
+                    short_bundle_length = joined_length(
+                        short_bundle
+                    )
+
+                    protected_core_debug[
+                        "short_identity_bundle_length"
+                    ] = short_bundle_length
+
+                    if short_bundle_length <= 75:
+                        force_identity_short = True
+                        protected_core_debug[
+                            "identity_short_forced"
+                        ] = True
+                    else:
+                        protected_core_unresolved = True
+                else:
+                    protected_core_unresolved = True
+
+            protected_core_debug[
+                "resolved"
+            ] = not protected_core_unresolved
+
+
+        # =================================================
         # 8. Value-Protected Execution Order
         #
         # Quantity is already handled as the fixed prefix.
@@ -840,12 +991,33 @@ class TitleGenerator:
             == "COMPATIBILITY"
         ]
 
+        protected_primary_models = []
+
+        for item in indexed_candidates:
+
+            candidate = item[1]
+
+            if not isinstance(candidate, dict):
+                continue
+
+            candidate_type = normalize_text(
+                candidate.get("type", "")
+            ).upper()
+
+            if (
+                candidate_type in {"MODEL", "PART_NUMBER"}
+                and bool(candidate.get("required", False))
+                and len(protected_primary_models) < 2
+            ):
+                protected_primary_models.append(item)
+
+
         protected_indexes = {
             index
             for index, _ in (
                 protected_identity
-                +
-                protected_compatibility
+                + protected_compatibility
+                + protected_primary_models
             )
         }
 
@@ -857,10 +1029,9 @@ class TitleGenerator:
 
         execution_candidates = (
             protected_identity
-            +
-            protected_compatibility
-            +
-            remaining_candidates
+            + protected_compatibility
+            + protected_primary_models
+            + remaining_candidates
         )
 
 
@@ -970,14 +1141,100 @@ class TitleGenerator:
             # 也不重新理解产品。
             # =================================================
 
+            # If Strategy could not provide a short identity that resolves
+            # an over-budget protected core, do not fill remaining space
+            # with lower-value optional content after a protected item is lost.
+            if (
+                protected_core_unresolved
+                and
+                not required
+                and
+                candidate_type
+                not in {
+                    "IDENTITY",
+                    "COMPATIBILITY",
+                    "MODEL",
+                    "PART_NUMBER",
+                }
+            ):
+
+                rejected_candidates.append(
+                    {
+                        "index": index,
+                        "text": text,
+                        "short_text": normalize_text(
+                            candidate.get(
+                                "short_text",
+                                "",
+                            )
+                        ),
+                        "type": candidate_type,
+                        "priority": priority,
+                        "required": required,
+                        "reason": "protected_core_unresolved",
+                        "current_length": len(
+                            current_title()
+                        ),
+                        "text_length": len(text),
+                        "short_text_length": len(
+                            normalize_text(
+                                candidate.get(
+                                    "short_text",
+                                    "",
+                                )
+                            )
+                        ),
+                    }
+                )
+
+                continue
+
+
+            budget_candidate = candidate
+
+
+            if (
+                candidate_type == "IDENTITY"
+                and
+                force_identity_short
+            ):
+
+                forced_short = normalize_text(
+                    candidate.get(
+                        "short_text",
+                        "",
+                    )
+                )
+
+                if forced_short:
+                    budget_candidate = dict(candidate)
+                    budget_candidate["text"] = forced_short
+                    budget_candidate["short_text"] = ""
+
+
             budget_result = (
                 CandidateBudgetEngine
                 .choose_candidate_text(
                     parts=title_parts,
-                    candidate=candidate,
+                    candidate=budget_candidate,
                     max_length=75,
                 )
             )
+
+
+            if (
+                candidate_type == "IDENTITY"
+                and
+                force_identity_short
+                and
+                budget_result.get(
+                    "accepted",
+                    False,
+                )
+            ):
+                budget_result[
+                    "source"
+                ] = "protected_core_short_text"
 
 
             accepted = bool(
@@ -1345,7 +1602,7 @@ class TitleGenerator:
             # =============================================
 
             "generator_version":
-                "V3.4-compact-quantity-protected-compatibility",
+                "V3.5-protected-core-budget",
 
             "budget_parts":
                 title_parts,
@@ -1370,6 +1627,9 @@ class TitleGenerator:
                         title
                     ),
                 ),
+
+            "protected_core":
+                protected_core_debug,
         }
 
     # =====================================================
