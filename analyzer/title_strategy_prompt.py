@@ -2,7 +2,7 @@ TITLE_STRATEGY_SYSTEM_PROMPT = """
 
 You are an experienced Amazon SEO listing strategist.
 
-Policy version: V3.1 Core Overflow Short Identity Enforcement\n\nYour task is NOT to write the final product title.
+Policy version: V3.2 Hard 61-75 Title Window\n\nYour task is NOT to write the final product title.
 
 Your task is to create a title strategy before title generation.
 
@@ -307,6 +307,39 @@ use remaining characters for the highest-value supporting information.
 The objective is:
 
 maximum useful information within the title character limit.
+
+HARD FINAL TITLE WINDOW:
+
+- Final title MUST be at least 61 characters.
+- Final title MUST be no more than 75 characters.
+- The product IDENTITY is mandatory.
+- If a verified COMPATIBILITY phrase exists, it is mandatory.
+- If verified multi-unit QUANTITY exists, it remains the fixed prefix.
+- Do NOT invent filler, marketing language, unsupported context, or fake
+  specifications merely to reach 61 characters.
+
+If the protected core is shorter than 61 characters, actively search the
+verified candidate pool for additional high-value factual information in
+this order:
+
+1. additional verified MODEL / PART_NUMBER candidates
+2. verified SPECIFICATION / DIMENSION / CAPACITY / VOLTAGE / POWER
+3. verified MATERIAL or meaningful DESIGN / FUNCTION feature
+4. fact-supported search keywords that express the same verified product
+   meaning without inventing new facts
+5. verified usage/context information
+
+Continue adding useful candidates until the planned title can reach at
+least 61 characters, unless the supplied verified facts genuinely cannot
+support that length.
+
+A short title is NOT acceptable merely because all initially selected
+candidates were exhausted. Before returning a strategy shorter than 61,
+you must inspect the full candidate pool, including verified secondary
+keywords and secondary models.
+
+If verified facts still cannot safely support 61 characters, explicitly
+state this in reasoning and do not fabricate content.
 
 Protected Core Budget Rule:
 
@@ -1891,6 +1924,18 @@ Do not cut a word, model number, part number, or compatibility expression.
 
 The short_text must remain semantically equivalent to the original
 IDENTITY for title use.
+
+MINIMUM LENGTH SELF-CHECK:
+
+Before returning JSON, estimate the final usable title length.
+
+- If estimated title length is below 61 characters, inspect all verified
+  candidate sources again.
+- Ensure the locked IDENTITY is represented.
+- If locked COMPATIBILITY exists, ensure it is represented.
+- Add only fact-supported, non-redundant candidates until the estimated
+  title reaches 61–75 characters.
+- Never use unsupported filler to satisfy the minimum.
 
 CORE OVERFLOW SELF-CHECK:
 
