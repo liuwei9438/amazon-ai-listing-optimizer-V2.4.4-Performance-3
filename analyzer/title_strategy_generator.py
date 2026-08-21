@@ -4,6 +4,8 @@ import json
 
 from openai import OpenAI
 
+from core.title_fact_gate import TitleFactGate
+
 from services.ai_runtime import DEFAULT_TIMEOUT_SECONDS, execute_with_retry
 
 from .title_strategy_prompt import (
@@ -90,9 +92,25 @@ class TitleStrategyGenerator:
                 "title_strategy_input.locked.identity.text is missing"
             )
 
+        fact_gate = TitleFactGate.build(
+            profile
+        )
+
         strategy_payload = dict(
             strategy_input
         )
+
+        strategy_payload[
+            "approved_title_fact_pool"
+        ] = fact_gate
+
+        strategy_input = dict(
+            strategy_input
+        )
+
+        strategy_input[
+            "approved_title_fact_pool"
+        ] = fact_gate
 
         strategy_payload[
             "title_constraints"
@@ -120,8 +138,8 @@ class TitleStrategyGenerator:
                 75,
             "objective":
                 (
-                    "maximize verified search and purchase value while "
-                    "preserving mandatory identity, compatibility and model facts"
+                    "use approved_title_fact_pool for brands/models/specifications; "
+                    "maximize verified search and purchase value while preserving mandatory facts"
                 ),
         }
 
@@ -256,6 +274,18 @@ class TitleStrategyGenerator:
                     ][
                         "repair_attempted"
                     ] = True
+
+
+                    # V7 fail-closed: failed repair cannot become a valid final title.
+                    if not result[
+                        "final_title_validation"
+                    ].get(
+                        "hard_constraints_ok",
+                        False,
+                    ):
+                        result[
+                            "composition_status"
+                        ] = "VALIDATION_FAILED"
 
             return result
 
@@ -994,7 +1024,11 @@ HARD RULES:
 - never include seller brand
 - never use source boilerplate/noise
 - never create semantic fragments by cutting a phrase
+- brands, models, part numbers and specifications must come from
+  approved_title_fact_pool.approved_facts
+- never use approved_title_fact_pool.rejected_facts
 - follow target_language grammar and marketplace search habits
+- count the literal final_title before returning; never claim READY outside 61-75
 
 If verified facts truly cannot support 61 characters, return the best truthful
 title and composition_status="INSUFFICIENT_VERIFIED_FACTS".
@@ -3334,6 +3368,7 @@ If the joint numeric budget cannot be met safely, return safe=false.
             "READY",
             "INSUFFICIENT_VERIFIED_FACTS",
             "CORE_CONFLICT",
+            "VALIDATION_FAILED",
         }
 
         if (
