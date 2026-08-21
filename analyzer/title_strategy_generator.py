@@ -23,6 +23,17 @@ class TitleStrategyGenerator:
         api_key: str,
         model="gpt-4.1-mini",
     ):
+        """
+        V6.0 Title Planner + Language-Aware Composer.
+
+        Normal path:
+        - one AI call decides strategy AND final_title
+        - deterministic validation checks hard rules
+        - only failed titles receive one targeted repair call
+
+        This replaces the old architecture where Generator mechanically
+        assembled/cropped candidate phrases after Strategy.
+        """
 
         client = OpenAI(
             api_key=api_key,
@@ -30,30 +41,12 @@ class TitleStrategyGenerator:
             max_retries=0,
         )
 
-        # =================================================
-        # Title Strategy Input
-        #
-        # Title Strategy 只读取已经标准化后的统一输入。
-        #
-        # 不再直接读取：
-        # - product_identity
-        # - product_knowledge
-        # - compatibility
-        # - fact_lock
-        # - basic_info
-        #
-        # 避免多个事实来源重新产生歧义。
-        # =================================================
-
         strategy_input = profile.get(
             "title_strategy_input",
             {},
         )
 
-        if not isinstance(
-            strategy_input,
-            dict,
-        ):
+        if not isinstance(strategy_input, dict):
             raise TitleStrategyError(
                 "title_strategy_input must be a dictionary"
             )
@@ -68,10 +61,7 @@ class TitleStrategyGenerator:
             {},
         )
 
-        if not isinstance(
-            locked,
-            dict,
-        ):
+        if not isinstance(locked, dict):
             raise TitleStrategyError(
                 "title_strategy_input.locked must be a dictionary"
             )
@@ -81,10 +71,7 @@ class TitleStrategyGenerator:
             {},
         )
 
-        if not isinstance(
-            locked_identity,
-            dict,
-        ):
+        if not isinstance(locked_identity, dict):
             raise TitleStrategyError(
                 "title_strategy_input.locked.identity must be a dictionary"
             )
@@ -103,13 +90,6 @@ class TitleStrategyGenerator:
                 "title_strategy_input.locked.identity.text is missing"
             )
 
-        # =================================================
-        # Strategy Payload
-        #
-        # 不直接修改 profile["title_strategy_input"]。
-        # 创建发送给 AI 的独立副本，并添加标题策略约束。
-        # =================================================
-
         strategy_payload = dict(
             strategy_input
         )
@@ -117,51 +97,64 @@ class TitleStrategyGenerator:
         strategy_payload[
             "title_constraints"
         ] = {
+            **(
+                strategy_input.get(
+                    "title_constraints",
+                    {},
+                )
+                if isinstance(
+                    strategy_input.get(
+                        "title_constraints",
+                        {},
+                    ),
+                    dict,
+                )
+                else
+                {}
+            ),
             "marketplace":
                 "Amazon",
-
+            "min_title_length":
+                61,
             "max_title_length":
                 75,
-
             "objective":
-                "maximize purchase-relevant information within the title limit",
+                (
+                    "maximize verified search and purchase value while "
+                    "preserving mandatory identity, compatibility and model facts"
+                ),
         }
 
         def _request_once():
             return client.chat.completions.create(
                 model=model,
-
-            messages=[
-                {
-                    "role":
-                        "system",
-
-                    "content":
-                        TITLE_STRATEGY_SYSTEM_PROMPT,
+                messages=[
+                    {
+                        "role":
+                            "system",
+                        "content":
+                            TITLE_STRATEGY_SYSTEM_PROMPT,
+                    },
+                    {
+                        "role":
+                            "user",
+                        "content":
+                            json.dumps(
+                                strategy_payload,
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                    },
+                ],
+                response_format={
+                    "type":
+                        "json_object"
                 },
-
-                {
-                    "role":
-                        "user",
-
-                    "content":
-                        json.dumps(
-                            strategy_payload,
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                },
-            ],
-
-            response_format={
-                "type":
-                    "json_object"
-            },
             )
 
         response = execute_with_retry(
             _request_once,
-            stage="title_strategy",
+            stage="title_strategy_v6",
         )
 
         try:
@@ -178,21 +171,91 @@ class TitleStrategyGenerator:
                 )
             )
 
-            # =============================================
-            # V3.2 Core Budget Validator + Targeted Repair
-            #
-            # Normal products do NOT make another AI call.
-            # Only unresolved protected-core cases enter this path.
-            # =============================================
-
-            result = (
+            validation = (
                 TitleStrategyGenerator
-                .repair_core_overflow_if_needed(
-                    result=result,
-                    client=client,
-                    model=model,
+                .validate_final_title(
+                    final_title=result.get(
+                        "final_title",
+                        "",
+                    ),
+                    strategy_input=strategy_input,
+                    composition_status=result.get(
+                        "composition_status",
+                        "",
+                    ),
                 )
             )
+
+            result[
+                "final_title_validation"
+            ] = validation
+
+            # Only failed titles receive a second AI call.
+            if not validation.get(
+                "hard_constraints_ok",
+                False,
+            ):
+                repaired = (
+                    TitleStrategyGenerator
+                    .repair_final_title(
+                        result=result,
+                        strategy_input=strategy_input,
+                        validation=validation,
+                        client=client,
+                        model=model,
+                    )
+                )
+
+                if repaired:
+                    result[
+                        "final_title"
+                    ] = repaired.get(
+                        "final_title",
+                        result.get(
+                            "final_title",
+                            "",
+                        ),
+                    )
+
+                    if repaired.get(
+                        "composition_status",
+                        "",
+                    ):
+                        result[
+                            "composition_status"
+                        ] = repaired[
+                            "composition_status"
+                        ]
+
+                    result[
+                        "final_title_repair_reason"
+                    ] = repaired.get(
+                        "reason",
+                        "",
+                    )
+
+                    result[
+                        "final_title_validation"
+                    ] = (
+                        TitleStrategyGenerator
+                        .validate_final_title(
+                            final_title=result.get(
+                                "final_title",
+                                "",
+                            ),
+                            strategy_input=strategy_input,
+                            composition_status=result.get(
+                                "composition_status",
+                                "",
+                            ),
+                        )
+                    )
+
+                    result[
+                        "final_title_validation"
+                    ][
+                        "repair_attempted"
+                    ] = True
 
             return result
 
@@ -200,6 +263,835 @@ class TitleStrategyGenerator:
             raise TitleStrategyError(
                 f"Title strategy parse failed: {exc}"
             )
+
+
+    @staticmethod
+    def _clean_text(value) -> str:
+        if value is None:
+            return ""
+
+        return __import__("re").sub(
+            r"\s+",
+            " ",
+            str(value),
+        ).strip()
+
+
+    @staticmethod
+    def _list_text(value) -> list[str]:
+        if not isinstance(
+            value,
+            list,
+        ):
+            return []
+
+        result = []
+        seen = set()
+
+        for item in value:
+            text = (
+                TitleStrategyGenerator
+                ._clean_text(
+                    item
+                )
+            )
+
+            if not text:
+                continue
+
+            key = text.casefold()
+
+            if key in seen:
+                continue
+
+            seen.add(
+                key
+            )
+            result.append(
+                text
+            )
+
+        return result
+
+
+    @staticmethod
+    def _compact_quantity(value) -> str:
+        text = (
+            TitleStrategyGenerator
+            ._clean_text(
+                value
+            )
+        )
+
+        if not text:
+            return ""
+
+        match = __import__("re").search(
+            r"\b(\d{1,4})\s*(?:pcs?|pieces?|piece|sets?)\b",
+            text,
+            flags=__import__("re").IGNORECASE,
+        )
+
+        if not match:
+            return ""
+
+        try:
+            count = int(
+                match.group(1)
+            )
+        except Exception:
+            return ""
+
+        if count <= 1:
+            return ""
+
+        return f"{count}pcs"
+
+
+    @staticmethod
+    def _compatibility_qualifiers(
+        target_language: str,
+    ) -> list[str]:
+        language = (
+            TitleStrategyGenerator
+            ._clean_text(
+                target_language
+            )
+            .casefold()
+        )
+
+        mapping = {
+            "english": [
+                "compatible with",
+            ],
+            "spanish": [
+                "compatible con",
+            ],
+            "español": [
+                "compatible con",
+            ],
+            "french": [
+                "compatible avec",
+            ],
+            "français": [
+                "compatible avec",
+            ],
+            "german": [
+                "kompatibel mit",
+            ],
+            "deutsch": [
+                "kompatibel mit",
+            ],
+            "italian": [
+                "compatibile con",
+            ],
+            "portuguese": [
+                "compatível com",
+                "compativel com",
+            ],
+            "dutch": [
+                "compatibel met",
+            ],
+            "swedish": [
+                "kompatibel med",
+            ],
+            "japanese": [
+                "対応",
+                "互換",
+            ],
+        }
+
+        for key, values in mapping.items():
+            if key in language:
+                return values
+
+        # Fallback accepts the common English phrase plus localized forms.
+        return sorted(
+            {
+                value
+                for values in mapping.values()
+                for value in values
+            }
+        )
+
+
+    @staticmethod
+    def validate_final_title(
+        final_title: str,
+        strategy_input: dict,
+        composition_status: str = "",
+    ) -> dict:
+        """
+        Deterministic final-title audit.
+
+        It validates facts and structure; it does NOT rewrite semantics.
+        """
+
+        title = (
+            TitleStrategyGenerator
+            ._clean_text(
+                final_title
+            )
+        )
+
+        title_fold = title.casefold()
+
+        errors = []
+
+        if not title:
+            errors.append(
+                "final_title_missing"
+            )
+
+        if len(title) > 75:
+            errors.append(
+                "title_above_75_characters"
+            )
+
+        if len(title) < 61:
+            errors.append(
+                "title_below_61_characters"
+            )
+
+        locked = (
+            strategy_input.get(
+                "locked",
+                {},
+            )
+            if isinstance(
+                strategy_input,
+                dict,
+            )
+            else
+            {}
+        )
+
+        if not isinstance(
+            locked,
+            dict,
+        ):
+            locked = {}
+
+        identity = (
+            TitleStrategyGenerator
+            ._clean_text(
+                (
+                    locked.get(
+                        "identity",
+                        {},
+                    )
+                    if isinstance(
+                        locked.get(
+                            "identity",
+                            {},
+                        ),
+                        dict,
+                    )
+                    else
+                    {}
+                ).get(
+                    "text",
+                    "",
+                )
+            )
+        )
+
+        if (
+            identity
+            and
+            identity.casefold()
+            not in
+            title_fold
+        ):
+            # Do not attempt fuzzy semantic validation here.
+            # AI may use a safe short identity, but it must be represented
+            # through a candidate short_text.
+            candidate_shorts = []
+
+            for candidate in (
+                strategy_input.get(
+                    "candidate_facts",
+                    {},
+                ).get(
+                    "source_title_segments",
+                    [],
+                )
+                if isinstance(
+                    strategy_input.get(
+                        "candidate_facts",
+                        {},
+                    ),
+                    dict,
+                )
+                else
+                []
+            ):
+                _ = candidate
+
+            errors.append(
+                "identity_missing"
+            )
+
+        # Quantity rule.
+        candidate_facts = (
+            strategy_input.get(
+                "candidate_facts",
+                {},
+            )
+            if isinstance(
+                strategy_input.get(
+                    "candidate_facts",
+                    {},
+                ),
+                dict,
+            )
+            else
+            {}
+        )
+
+        quantity = (
+            TitleStrategyGenerator
+            ._compact_quantity(
+                candidate_facts.get(
+                    "important_quantity",
+                    "",
+                )
+            )
+        )
+
+        if not quantity:
+            source_evidence = (
+                strategy_input.get(
+                    "source_evidence",
+                    {},
+                )
+                if isinstance(
+                    strategy_input.get(
+                        "source_evidence",
+                        {},
+                    ),
+                    dict,
+                )
+                else
+                {}
+            )
+
+            quantities = (
+                source_evidence.get(
+                    "quantities",
+                    [],
+                )
+                if isinstance(
+                    source_evidence.get(
+                        "quantities",
+                        [],
+                    ),
+                    list,
+                )
+                else
+                []
+            )
+
+            if quantities:
+                quantity = (
+                    TitleStrategyGenerator
+                    ._compact_quantity(
+                        quantities[0]
+                    )
+                )
+
+        if (
+            quantity
+            and
+            not title_fold.startswith(
+                quantity.casefold()
+            )
+        ):
+            errors.append(
+                "multi_unit_quantity_missing_or_not_prefixed"
+            )
+
+        # Compatibility facts.
+        compatibility_facts = (
+            strategy_input.get(
+                "compatibility_facts",
+                {},
+            )
+            if isinstance(
+                strategy_input.get(
+                    "compatibility_facts",
+                    {},
+                ),
+                dict,
+            )
+            else
+            {}
+        )
+
+        brands = (
+            TitleStrategyGenerator
+            ._list_text(
+                compatibility_facts.get(
+                    "brands",
+                    [],
+                )
+            )
+        )
+
+        if not brands:
+            brands = (
+                TitleStrategyGenerator
+                ._list_text(
+                    compatibility_facts.get(
+                        "third_party_brands",
+                        [],
+                    )
+                )
+            )
+
+        compatibility_models = (
+            TitleStrategyGenerator
+            ._list_text(
+                compatibility_facts.get(
+                    "models",
+                    [],
+                )
+            )
+        )
+
+        compatibility_models += [
+            model
+            for model in (
+                TitleStrategyGenerator
+                ._list_text(
+                    compatibility_facts.get(
+                        "important_compatibility",
+                        [],
+                    )
+                )
+            )
+            if model not in compatibility_models
+        ]
+
+        seller_brand = (
+            TitleStrategyGenerator
+            ._clean_text(
+                compatibility_facts.get(
+                    "seller_brand",
+                    "",
+                )
+            )
+        )
+
+        if (
+            seller_brand
+            and
+            seller_brand.casefold()
+            in
+            title_fold
+        ):
+            errors.append(
+                "seller_brand_leaked"
+            )
+
+        if brands:
+            if not any(
+                brand.casefold()
+                in
+                title_fold
+                for brand in brands
+            ):
+                errors.append(
+                    "compatibility_brand_missing"
+                )
+
+            qualifiers = (
+                TitleStrategyGenerator
+                ._compatibility_qualifiers(
+                    strategy_input.get(
+                        "target_language",
+                        "English",
+                    )
+                )
+            )
+
+            if not any(
+                qualifier.casefold()
+                in
+                title_fold
+                for qualifier in qualifiers
+            ):
+                errors.append(
+                    "compatibility_qualifier_missing"
+                )
+
+        # Locked primary model must not lose to low-value filler.
+        models_block = (
+            locked.get(
+                "models",
+                {},
+            )
+            if isinstance(
+                locked.get(
+                    "models",
+                    {},
+                ),
+                dict,
+            )
+            else
+            {}
+        )
+
+        primary_model = (
+            TitleStrategyGenerator
+            ._clean_text(
+                models_block.get(
+                    "primary",
+                    "",
+                )
+            )
+        )
+
+        if (
+            primary_model
+            and
+            primary_model.casefold()
+            not in
+            title_fold
+        ):
+            errors.append(
+                "primary_model_missing"
+            )
+
+        # If there is no brand but there ARE verified compatibility models,
+        # at least one of them must appear.
+        if (
+            not brands
+            and
+            compatibility_models
+            and
+            not any(
+                model.casefold()
+                in
+                title_fold
+                for model in compatibility_models
+            )
+        ):
+            errors.append(
+                "compatibility_models_missing"
+            )
+
+        # A <61 title is not allowed to declare insufficiency while verified
+        # compatibility models remain unused.
+        if len(title) < 61:
+            unused_compatibility_models = [
+                model
+                for model in compatibility_models
+                if model.casefold()
+                not in
+                title_fold
+            ]
+
+            if unused_compatibility_models:
+                errors.append(
+                    "unused_models_before_min_length"
+                )
+
+        # Discrete model range compression guard.
+        raw_title = (
+            TitleStrategyGenerator
+            ._clean_text(
+                (
+                    strategy_input.get(
+                        "source_evidence",
+                        {},
+                    )
+                    if isinstance(
+                        strategy_input.get(
+                            "source_evidence",
+                            {},
+                        ),
+                        dict,
+                    )
+                    else
+                    {}
+                ).get(
+                    "raw_title",
+                    "",
+                )
+            )
+        )
+
+        numeric_models = {
+            model
+            for model in compatibility_models
+            if __import__("re").fullmatch(
+                r"\d{2,}",
+                model,
+            )
+        }
+
+        for match in __import__("re").finditer(
+            r"\b(\d{2,})\s*[-–—]\s*(\d{2,})\b",
+            title,
+        ):
+            left = match.group(1)
+            right = match.group(2)
+            range_text = match.group(0)
+
+            if (
+                left in numeric_models
+                and
+                right in numeric_models
+                and
+                range_text.casefold()
+                not in
+                raw_title.casefold()
+            ):
+                errors.append(
+                    "forbidden_model_range_compression"
+                )
+                break
+
+        # Obvious source-noise fragments must never appear.
+        noise_patterns = [
+            r"\b\d+\.(?:please|the|technical)\b",
+            r"\b\d+-\d+\s*cm\s+(?:error|difference)\b",
+            r"\bmainland china\b",
+        ]
+
+        for pattern in noise_patterns:
+            if __import__("re").search(
+                pattern,
+                title,
+                flags=__import__("re").IGNORECASE,
+            ):
+                errors.append(
+                    "source_noise_in_title"
+                )
+                break
+
+        # De-duplicate error codes.
+        cleaned_errors = []
+
+        for error in errors:
+            if error not in cleaned_errors:
+                cleaned_errors.append(
+                    error
+                )
+
+        composition_status = (
+            TitleStrategyGenerator
+            ._clean_text(
+                composition_status
+            )
+            .upper()
+        )
+
+        return {
+            "title":
+                title,
+            "character_count":
+                len(title),
+            "hard_constraints_ok":
+                len(
+                    cleaned_errors
+                )
+                ==
+                0,
+            "errors":
+                cleaned_errors,
+            "identity":
+                identity,
+            "primary_model":
+                primary_model,
+            "compatibility_brands":
+                brands,
+            "compatibility_models":
+                compatibility_models,
+            "composition_status":
+                composition_status,
+            "repair_attempted":
+                False,
+        }
+
+
+    @staticmethod
+    def repair_final_title(
+        result: dict,
+        strategy_input: dict,
+        validation: dict,
+        client,
+        model: str,
+    ) -> dict:
+        """
+        One targeted repair call for failed composed titles.
+
+        The repair model receives exact error codes and the same verified facts.
+        It must rewrite the whole title naturally rather than crop phrases.
+        """
+
+        repair_payload = {
+            "current_title":
+                result.get(
+                    "final_title",
+                    "",
+                ),
+            "errors":
+                validation.get(
+                    "errors",
+                    [],
+                ),
+            "strategy_input":
+                strategy_input,
+            "selected_strategy": {
+                "core_product":
+                    result.get(
+                        "core_product",
+                        "",
+                    ),
+                "model_priority":
+                    result.get(
+                        "model_priority",
+                        [],
+                    ),
+                "compatibility_priority":
+                    result.get(
+                        "compatibility_priority",
+                        [],
+                    ),
+                "title_candidates":
+                    result.get(
+                        "title_candidates",
+                        [],
+                    ),
+                "unused_high_value_facts":
+                    result.get(
+                        "unused_high_value_facts",
+                        [],
+                    ),
+            },
+        }
+
+        repair_prompt = """
+You are repairing ONE Amazon title that failed deterministic V6 validation.
+
+Rewrite the WHOLE title naturally. Do not mechanically append or crop fragments.
+
+HARD RULES:
+- 61 to 75 characters whenever verified facts support it
+- preserve the locked product identity
+- quantity >1 uses compact prefix such as 5pcs; quantity 1 is omitted
+- if compatible brand exists, include the brand with the correct local-language
+  compatibility qualifier
+- include the verified primary model when present
+- when no brand exists but verified compatibility models exist, use the
+  highest-value models naturally (English commonly uses "for")
+- before using low-value material/color/features, use remaining verified
+  models when they add search value
+- never convert discrete models into ranges
+- never invent a model, brand, dimension, material, feature, or compatibility
+- never include seller brand
+- never use source boilerplate/noise
+- never create semantic fragments by cutting a phrase
+- follow target_language grammar and marketplace search habits
+
+If verified facts truly cannot support 61 characters, return the best truthful
+title and composition_status="INSUFFICIENT_VERIFIED_FACTS".
+
+Return JSON only:
+{
+  "final_title": "",
+  "composition_status": "READY|INSUFFICIENT_VERIFIED_FACTS|CORE_CONFLICT",
+  "reason": ""
+}
+"""
+
+        def _repair_once():
+            return client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role":
+                            "system",
+                        "content":
+                            repair_prompt,
+                    },
+                    {
+                        "role":
+                            "user",
+                        "content":
+                            json.dumps(
+                                repair_payload,
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                    },
+                ],
+                response_format={
+                    "type":
+                        "json_object"
+                },
+            )
+
+        try:
+            response = execute_with_retry(
+                _repair_once,
+                stage="title_strategy_v6_final_repair",
+            )
+
+            repaired = json.loads(
+                response.choices[0]
+                .message
+                .content
+            )
+
+            if not isinstance(
+                repaired,
+                dict,
+            ):
+                return {}
+
+            final_title = (
+                TitleStrategyGenerator
+                ._clean_text(
+                    repaired.get(
+                        "final_title",
+                        "",
+                    )
+                )
+            )
+
+            if not final_title:
+                return {}
+
+            return {
+                "final_title":
+                    final_title,
+                "composition_status":
+                    (
+                        TitleStrategyGenerator
+                        ._clean_text(
+                            repaired.get(
+                                "composition_status",
+                                "",
+                            )
+                        )
+                    ),
+                "reason":
+                    (
+                        TitleStrategyGenerator
+                        ._clean_text(
+                            repaired.get(
+                                "reason",
+                                "",
+                            )
+                        )
+                    ),
+            }
+
+        except Exception:
+            return {}
 
 
     @staticmethod
@@ -1334,6 +2226,7 @@ If the joint numeric budget cannot be met safely, return safe=false.
             "SECONDARY_IDENTITY",
             "MODEL",
             "PART_NUMBER",
+            "COMPATIBILITY_MODEL",
             "COMPATIBILITY",
             "FEATURE",
             "SPECIFICATION",
@@ -2413,6 +3306,93 @@ If the joint numeric budget cannot be met safely, return safe=false.
 
         result[
             "schema_version"
-        ] = "3.4-joint-core-budget-two-pass-repair"
+        ] = "6.0-final-title-planner-composer"
+
+        result[
+            "final_title"
+        ] = str(
+            result.get(
+                "final_title",
+                "",
+            )
+            or
+            ""
+        ).strip()
+
+        result[
+            "composition_status"
+        ] = str(
+            result.get(
+                "composition_status",
+                "",
+            )
+            or
+            ""
+        ).strip().upper()
+
+        allowed_composition_status = {
+            "READY",
+            "INSUFFICIENT_VERIFIED_FACTS",
+            "CORE_CONFLICT",
+        }
+
+        if (
+            result[
+                "composition_status"
+            ]
+            not in
+            allowed_composition_status
+        ):
+            result[
+                "composition_status"
+            ] = "READY"
+
+        result[
+            "compatibility_mode"
+        ] = str(
+            result.get(
+                "compatibility_mode",
+                "NONE",
+            )
+            or
+            "NONE"
+        ).strip().upper()
+
+        for list_field in (
+            "used_facts",
+            "unused_high_value_facts",
+        ):
+            value = result.get(
+                list_field,
+                [],
+            )
+
+            if not isinstance(
+                value,
+                list,
+            ):
+                value = []
+
+            cleaned = []
+
+            for item in value:
+                item_text = str(
+                    item
+                    or
+                    ""
+                ).strip()
+
+                if (
+                    item_text
+                    and
+                    item_text not in cleaned
+                ):
+                    cleaned.append(
+                        item_text
+                    )
+
+            result[
+                list_field
+            ] = cleaned
 
         return result
