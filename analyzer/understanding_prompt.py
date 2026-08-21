@@ -133,6 +133,41 @@ Seller/store/private-label branding must follow the Seller Brand Hygiene
 rules below and must not be converted into compatibility automatically.
 
 
+## 0.5 NUMERIC COMPATIBILITY MODEL RECOGNITION
+
+Pure numeric identifiers can be legitimate compatibility models.
+
+Example source:
+"Suitable For Chainsaw 340 345 346 350 351 353 357 359 362 365 372
+ Equipment Ignition Coil"
+
+When the source grammar clearly presents these numbers as compatible equipment
+models, preserve them as compatibility.models / important_compatibility even
+though they contain digits only.
+
+Do NOT require a model to contain letters.
+
+Do NOT convert a discrete model list into a numeric range.
+
+Example:
+340 345 346 350 351 353 357 359 362 365 372
+
+must NOT become:
+340-372
+
+because that would imply unsupported intermediate models.
+
+Distinguish numeric models from:
+- dimensions
+- voltage/power
+- quantities
+- measurement tolerance notes
+- dates
+- source instruction numbering
+
+Use source context to classify them.
+
+
 ## 1. Fact Protection
 
 Only use information directly supported by SOURCE.
