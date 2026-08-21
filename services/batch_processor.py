@@ -21,9 +21,8 @@ from analyzer.model_protection import ModelProtection
 from analyzer.seo_intent_engine import generate_primary_search
 from analyzer.seo_keyword_engine import SEOKeywordEngine
 
-from analyzer.title_strategy_generator import (
-    TitleStrategyGenerator,
-    TitleStrategyError,
+from core.stable_title_pipeline import (
+    StableTitlePipeline,
 )
 from understanding.identity_decision import (
     IdentityDecisionEngine,
@@ -40,7 +39,6 @@ from core.title_planner import TitlePlanner
 
 from generator.highlight_generator import HighlightGenerator
 from generator.short_title_generator import ShortTitleGenerator
-from generator.title_generator import TitleGenerator
 from generator.bullet_generator import BulletGenerator
 from generator.description_generator import DescriptionGenerator
 
@@ -512,102 +510,25 @@ def process_batch(
                 2
             )
             # =====================
-            # AI Title Strategy
+            # Stable Title Pipeline
+            # title planning is executed later, after all current profile
+            # information has been prepared.
+            #
+            # IMPORTANT:
+            # The old TitleStrategyGenerator is intentionally disabled here.
+            # StableTitlePipeline owns:
+            # Fact Resolver -> AI Priority Planner -> Budget Composer ->
+            # Final Validator.
             # =====================
-            
-            title_strategy = {}
-            
-            
-            if enable_title:
-            
-                strategy_start = time.time()
-            
-                save_status(
-                    task_id,
-                    {
-                        "status": "processing",
-                        "message":
-                            f"第 {index+1}/{total} 个产品：AI标题策略分析中",
-                        "completed": index,
-                        "total": total,
-                    }
-                )
-            
-            
-                try:
-            
-                    title_strategy = (
-                        TitleStrategyGenerator.generate(
-                            profile=profile,
-                            api_key=api_key,
-                            model=model,
-                        )
-                    )
-            
-            
-                    if not isinstance(
-                        title_strategy,
-                        dict,
-                    ):
-            
-                        title_strategy = {}
-            
-            
-                    profile[
-                        "title_strategy"
-                    ] = title_strategy
-            
-            
-                    profile[
-                        "title_strategy_error"
-                    ] = ""
-            
-            
-                except Exception as strategy_exc:
-            
-                    # Title Strategy失败时不要让整个产品失败。
-                    # 保留旧TitlePlanner作为fallback。
-                    title_strategy = {}
-            
-            
-                    profile[
-                        "title_strategy"
-                    ] = {}
-            
-            
-                    profile[
-                        "title_strategy_error"
-                    ] = str(
-                        strategy_exc
-                    )
-            
-            
-                    print(
-                        "TITLE STRATEGY FAILED:",
-                        strategy_exc,
-                    )
-            
-            
-                timing[
-                    "title_strategy"
-                ] = round(
-                    time.time() - strategy_start,
-                    2
-                )
-            
-            
-            else:
-            
-                profile[
-                    "title_strategy"
-                ] = {}
-            
-            
-                profile[
-                    "title_strategy_error"
-                ] = ""
-            
-            
+
+            profile[
+                "title_strategy"
+            ] = {}
+
+            profile[
+                "title_strategy_error"
+            ] = ""
+
             # =====================
             # Legacy Title Plan
             # fallback only
@@ -780,12 +701,10 @@ def process_batch(
 
 
             # =====================
-            # Title
+            # Stable Title Pipeline V1.0
             # =====================
 
-
             start = time.time()
-
 
             if enable_title:
 
@@ -793,31 +712,107 @@ def process_batch(
                     task_id,
                     {
                         "status": "processing",
-                        "message": f"第 {index+1}/{total} 个产品：生成标题",
+                        "message":
+                            f"第 {index+1}/{total} 个产品：Stable 标题生成",
                         "completed": index,
                         "total": total,
                     }
                 )
-                title_result = (
-                    TitleGenerator.generate(
-                        profile
+
+                stable_title_result = (
+                    StableTitlePipeline.run(
+                        profile=profile,
+                        api_key=api_key,
+                        model=model,
+                        use_ai_planner=True,
                     )
                 )
 
+                profile[
+                    "stable_title_pipeline"
+                ] = stable_title_result
+
+                if (
+                    stable_title_result.get(
+                        "status"
+                    )
+                    !=
+                    "PASS"
+                ):
+                    raise RuntimeError(
+                        "Stable title validation failed: "
+                        +
+                        str(
+                            stable_title_result.get(
+                                "status",
+                                "UNKNOWN"
+                            )
+                        )
+                        +
+                        " | "
+                        +
+                        str(
+                            stable_title_result.get(
+                                "validation",
+                                {}
+                            ).get(
+                                "errors",
+                                []
+                            )
+                        )
+                    )
+
+                title_result = {
+                    "title":
+                        stable_title_result.get(
+                            "title",
+                            ""
+                        ),
+
+                    "character_count":
+                        stable_title_result.get(
+                            "character_count",
+                            0
+                        ),
+
+                    "validation":
+                        stable_title_result.get(
+                            "validation",
+                            {}
+                        ),
+
+                    "generator_version":
+                        stable_title_result.get(
+                            "pipeline_version",
+                            "stable-title-pipeline-v1.0"
+                        ),
+
+                    "solver": {
+                        "status":
+                            "resolved",
+                        "stable_pipeline":
+                            True,
+                        "ai_planner_status":
+                            stable_title_result.get(
+                                "ai_planner_status",
+                                ""
+                            ),
+                    },
+                }
 
             else:
 
-
+                stable_title_result = {}
                 title_result = {}
 
-
-
-            timing["title"] = round(
-                time.time() - start,
+            timing[
+                "title"
+            ] = round(
+                time.time()
+                -
+                start,
                 2
             )
-
-
 
             models = (
                 ModelProtection
@@ -829,13 +824,12 @@ def process_batch(
 
             if enable_title:
 
-
+                # Stable pipeline already validates model preservation and
+                # range-compression rules. Do not mutate the title after its
+                # final validator has passed.
                 profile[
                     "generated_title"
-                ] = ModelProtection.protect_result(
-                    title_result,
-                    models,
-                )
+                ] = title_result
 
 
             else:
