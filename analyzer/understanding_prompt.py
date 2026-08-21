@@ -68,17 +68,69 @@ def build_user_prompt(
     record: Any,
     fact_lock: dict[str, Any],
     profile_template: dict[str, Any],
+    source_fact_ledger: dict[str, Any] | None = None,
 ) -> str:
 
 
     source = _record_dict(
         record
     )
+
+    if not isinstance(
+        source_fact_ledger,
+        dict,
+    ):
+        source_fact_ledger = {}
+
     return f"""
 Analyze the SOURCE as one product and fill the complete Product Profile.
 
 
 IMPORTANT RULES:
+
+
+## 0. SOURCE FACT COVERAGE — NO SILENT DROP
+
+A deterministic SOURCE FACT LEDGER is provided below.
+
+This ledger exists because source listings often contain high-value facts
+that can be accidentally lost during product understanding.
+
+You MUST inspect the original SOURCE together with SOURCE_FACT_LEDGER.
+
+Important distinction:
+
+- You are allowed to decide that a source phrase is low value, marketing,
+  seller/store branding, redundant, or unsuitable for the title.
+- You are NOT allowed to silently forget a high-value source fact.
+
+Pay special attention to:
+
+- model numbers
+- part numbers
+- product codes
+- series
+- device / machine / equipment context
+- compatibility clues
+- dimensions and specifications
+- quantity
+- material
+- product-defining secondary nouns
+
+If an alphanumeric code appears in the source title, do not discard it
+merely because its exact semantic class is uncertain. Preserve it in the
+most appropriate identifier / compatibility / context field supported by
+the source.
+
+If a source title contains meaningful device/application context such as
+"Woodworking Edgebanding Machine", "CNC Router", "Sewing Machine", etc.,
+preserve that context when it helps identify or search for the product.
+
+Marketing terms such as Wholesale, Original, Genuine, Official, OEM,
+Premium, Best Seller, etc. must NOT be preserved as product facts.
+
+Seller/store/private-label branding must follow the Seller Brand Hygiene
+rules below and must not be converted into compatibility automatically.
 
 
 ## 1. Fact Protection
@@ -815,7 +867,12 @@ SOURCE:
 )}
 
 
-VERIFIED FACT LOCK:
+VERIFIED SOURCE_FACT_LEDGER:
+
+{json.dumps(source_fact_ledger, ensure_ascii=False, indent=2)}
+
+
+FACT LOCK:
 
 {json.dumps(
     fact_lock,
