@@ -271,7 +271,7 @@ class TitleGenerator:
         profile: dict,
     ) -> dict:
         """
-        V4.0 Final Title Constraint Solver
+        V4.1 Semantic Dedup + Core Compression
 
         Hard rules:
         - 61 <= final title <= 75
@@ -339,14 +339,104 @@ class TitleGenerator:
 
 
         def words(value):
-            return [
+            normalized = normalize_text(value).casefold()
+
+            # Normalize compact measurement/electrical expressions so
+            # semantically identical values such as "220 V" and "220V"
+            # receive the same token.
+            normalized = re.sub(
+                r"(?i)\b(\d+(?:\.\d+)?)\s*(mm|cm|m|v|w|kw|a|ah|mah|kg|g|lb|lbs|ft|inch|inches)\b",
+                lambda match: f"{match.group(1)}{match.group(2).lower()}",
+                normalized,
+            )
+
+            tokens = [
                 token.casefold()
                 for token in re.findall(
                     r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)*",
-                    normalize_text(value),
+                    normalized,
                 )
                 if token
             ]
+
+            ignore = {
+                "with",
+                "for",
+                "and",
+                "the",
+                "a",
+                "an",
+                "of",
+                "to",
+                "in",
+                "on",
+                "size",
+                "model",
+                "number",
+                "voltage",
+            }
+
+            result = []
+
+            for token in tokens:
+                if token in ignore:
+                    continue
+
+                if (
+                    len(token) > 4
+                    and
+                    token.endswith("s")
+                    and
+                    not token.endswith(("ss", "us", "is"))
+                ):
+                    token = token[:-1]
+
+                result.append(token)
+
+            return result
+
+
+        def semantic_signature(value):
+            return set(words(value))
+
+
+        def is_semantically_redundant(
+            text_value,
+            existing_parts,
+        ):
+            """
+            Reject phrases that merely restate information already present
+            elsewhere in the title, even when the words are distributed over
+            multiple existing parts.
+
+            Examples:
+            - Chain pad + Rubber -> "Rubber chain pad" is redundant.
+            - 79X72mm + Chain pad -> "79X72mm chain pad" is redundant.
+            - 220V -> "220 V" is redundant.
+            """
+
+            new_signature = semantic_signature(
+                text_value
+            )
+
+            if not new_signature:
+                return True
+
+            existing_signature = set()
+
+            for existing_part in existing_parts:
+                existing_signature.update(
+                    semantic_signature(
+                        existing_part
+                    )
+                )
+
+            if not existing_signature:
+                return False
+
+            return new_signature.issubset(
+                existing_signature
+            )
 
 
         def compact_quantity(value):
@@ -748,10 +838,328 @@ class TitleGenerator:
                 identity_short
             )
 
-        # V4.0 conservative syntax compression:
+        def add_identity_variant(value):
+            candidate = normalize_text(
+                value
+            )
+
+            # Never allow a syntactically broken identity representation.
+            candidate = re.sub(
+                r"(?i)\b(?:and|for|with|of|to)\s*$",
+                "",
+                candidate,
+            ).strip(" ,-/&")
+
+            if (
+                candidate
+                and
+                candidate not in identity_variants
+            ):
+                identity_variants.append(
+                    candidate
+                )
+
+
+        # V4.1 source-backed compression.
+        #
+        # These alternatives come only from already verified identity fields
+        # in the profile. They are not invented by the final solver.
+        identity_decision = profile.get(
+            "identity_decision",
+            {},
+        )
+
+        if not isinstance(identity_decision, dict):
+            identity_decision = {}
+
+        source_identities = identity_decision.get(
+            "source_identities",
+            {},
+        )
+
+        if not isinstance(source_identities, dict):
+            source_identities = {}
+
+        identity_source_candidates = []
+
+        for source_name in (
+            "raw_product_name",
+            "title_product_identity",
+            "knowledge_object_name",
+        ):
+            source_value = source_identities.get(
+                source_name,
+                {},
+            )
+
+            if isinstance(source_value, dict):
+                source_value = source_value.get(
+                    "text",
+                    "",
+                )
+
+            source_value = normalize_text(
+                source_value
+            )
+
+            if source_value:
+                identity_source_candidates.append(
+                    source_value
+                )
+
+        product_identity = profile.get(
+            "product_identity",
+            {},
+        )
+
+        if isinstance(product_identity, dict):
+            identity_source_candidates.append(
+                normalize_text(
+                    product_identity.get(
+                        "name",
+                        "",
+                    )
+                )
+            )
+
+        basic_info = profile.get(
+            "basic_info",
+            {},
+        )
+
+        if isinstance(basic_info, dict):
+            identity_source_candidates.append(
+                normalize_text(
+                    basic_info.get(
+                        "product_name",
+                        "",
+                    )
+                )
+            )
+
+        title_plan_for_identity = profile.get(
+            "title_plan",
+            {},
+        )
+
+        if isinstance(title_plan_for_identity, dict):
+            plan_main = title_plan_for_identity.get(
+                "main_product",
+                [],
+            )
+
+            if isinstance(plan_main, list):
+                identity_source_candidates.extend(
+                    normalize_text(value)
+                    for value in plan_main
+                    if normalize_text(value)
+                )
+
+        full_signature = semantic_signature(
+            identity_full
+        )
+
+        # Preserve a compact product-head suffix when a verified candidate
+        # drops the final product-type noun(s), e.g. "... Seesaw" -> 
+        # "... Seesaw Upgrade Kit".
+        full_tokens_original = re.findall(
+            r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)*",
+            identity_full,
+        )
+
+        head_suffix = ""
+
+        if len(full_tokens_original) >= 2:
+            last_two = " ".join(
+                full_tokens_original[-2:]
+            )
+
+            generic_head_words = {
+                "kit",
+                "valve",
+                "assembly",
+                "cover",
+                "holder",
+                "wheel",
+                "sensor",
+                "board",
+                "gasket",
+                "pad",
+                "plate",
+                "shaft",
+                "bar",
+                "hose",
+                "motor",
+                "pump",
+                "switch",
+                "filter",
+                "adapter",
+                "gearbox",
+            }
+
+            if (
+                full_tokens_original[-1].casefold()
+                in generic_head_words
+            ):
+                head_suffix = last_two
+
+        for source_candidate in identity_source_candidates:
+            source_candidate = re.sub(
+                r"(?i)\b(?:and|for|with|of|to)\s*$",
+                "",
+                source_candidate,
+            ).strip(" ,-/&")
+
+            if not source_candidate:
+                continue
+
+            source_signature = semantic_signature(
+                source_candidate
+            )
+
+            if not source_signature:
+                continue
+
+            overlap_ratio = (
+                len(
+                    source_signature
+                    &
+                    full_signature
+                )
+                /
+                max(
+                    1,
+                    len(full_signature),
+                )
+            )
+
+            # Require substantial semantic coverage of the locked identity.
+            if overlap_ratio < 0.45:
+                continue
+
+            identity_variant_value = source_candidate
+
+            if (
+                head_suffix
+                and
+                full_tokens_original
+                and
+                full_tokens_original[-1].casefold()
+                not in semantic_signature(
+                    identity_variant_value
+                )
+            ):
+                identity_variant_value = normalize_text(
+                    identity_variant_value
+                    +
+                    " "
+                    +
+                    head_suffix
+                )
+
+            add_identity_variant(
+                identity_variant_value
+            )
+
+        # Structural de-duplication for compound identities.
+        #
+        # Example:
+        # "Rear Spring Suspension Axle and Rear Spring Rubber PU Bar"
+        # ->
+        # "Rear Spring Suspension Axle & Rubber PU Bar"
+        compound_match = re.match(
+            r"^(.+?)\s+and\s+(.+)$",
+            identity_full,
+            flags=re.IGNORECASE,
+        )
+
+        if compound_match:
+            left = normalize_text(
+                compound_match.group(1)
+            )
+            right = normalize_text(
+                compound_match.group(2)
+            )
+
+            left_tokens = left.split()
+            right_tokens = right.split()
+
+            removable_prefix = 0
+
+            # Remove only a repeated prefix of the second conjunct that is
+            # already explicitly present in the first conjunct. Require at
+            # least two repeated words to avoid aggressive compression.
+            for prefix_length in range(
+                min(4, len(right_tokens)),
+                1,
+                -1,
+            ):
+                prefix = [
+                    token.casefold()
+                    for token in right_tokens[
+                        :prefix_length
+                    ]
+                ]
+
+                left_fold = [
+                    token.casefold()
+                    for token in left_tokens
+                ]
+
+                found = False
+
+                for start in range(
+                    0,
+                    max(
+                        0,
+                        len(left_fold)
+                        -
+                        prefix_length
+                        +
+                        1,
+                    ),
+                ):
+                    if (
+                        left_fold[
+                            start:
+                            start
+                            +
+                            prefix_length
+                        ]
+                        ==
+                        prefix
+                    ):
+                        found = True
+                        break
+
+                if found:
+                    removable_prefix = (
+                        prefix_length
+                    )
+                    break
+
+            if (
+                removable_prefix
+                and
+                removable_prefix
+                <
+                len(right_tokens)
+            ):
+                add_identity_variant(
+                    left
+                    +
+                    " & "
+                    +
+                    " ".join(
+                        right_tokens[
+                            removable_prefix:
+                        ]
+                    )
+                )
+
+        # Conservative syntax compression:
         # replacing standalone "and" with "&" preserves the same product
-        # meaning while saving two characters. This is used only as another
-        # candidate representation; it never changes the locked identity.
+        # meaning while saving two characters.
         for identity_variant_source in list(
             identity_variants
         ):
@@ -766,20 +1174,19 @@ class TitleGenerator:
                 ampersand_variant
             )
 
-            if (
+            add_identity_variant(
                 ampersand_variant
-                and
-                ampersand_variant
-                !=
-                identity_variant_source
-                and
-                ampersand_variant
-                not in
-                identity_variants
-            ):
-                identity_variants.append(
-                    ampersand_variant
-                )
+            )
+
+        # Shorter representations are considered only when necessary; the
+        # core sorter below still prefers the complete locked identity.
+        identity_variants = list(
+            dict.fromkeys(
+                value
+                for value in identity_variants
+                if value
+            )
+        )
 
         compatibility_variants = [
             compatibility_full,
@@ -831,11 +1238,9 @@ class TitleGenerator:
                                 len(title_value),
                             "identity_is_short":
                                 bool(
-                                    identity_short
-                                    and
                                     identity_variant
-                                    ==
-                                    identity_short
+                                    !=
+                                    identity_full
                                 ),
                             "compatibility_is_compressed":
                                 bool(
@@ -849,39 +1254,88 @@ class TitleGenerator:
                     )
 
         if not core_variants:
-            # No safe way to satisfy mandatory identity+compatibility under 75.
-            # Preserve identity first, then shortest verified compatibility.
+            # No safe complete identity+compatibility bundle fits under 75.
+            #
+            # V4.1 never word-truncates a mandatory phrase because that can
+            # create invalid endings such as "Compatible with". Keep the
+            # shortest complete verified identity representation, then append
+            # compatibility only when the complete phrase fits.
+            safe_identity_options = sorted(
+                {
+                    value
+                    for value in identity_variants
+                    if value
+                },
+                key=len,
+            )
+
+            emergency_identity = (
+                safe_identity_options[0]
+                if safe_identity_options
+                else
+                identity_full
+            )
+
             emergency_parts = [
                 part
                 for part in [
                     quantity_text,
-                    identity_short
-                    or
-                    identity_full,
-                    compatibility_first_brand
-                    or
-                    compatibility_short
-                    or
-                    compatibility_full,
+                    emergency_identity,
                 ]
                 if part
             ]
+
+            emergency_compatibility = (
+                compatibility_first_brand
+                or
+                compatibility_short
+                or
+                compatibility_full
+            )
+
+            if emergency_compatibility:
+                proposal = " ".join(
+                    emergency_parts
+                    +
+                    [
+                        emergency_compatibility
+                    ]
+                )
+
+                if len(proposal) <= 75:
+                    emergency_parts.append(
+                        emergency_compatibility
+                    )
 
             emergency_title = " ".join(
                 emergency_parts
             )
 
+            # If quantity + identity itself exceeds the limit, prefer the
+            # complete identity over a broken/truncated phrase.
             if len(emergency_title) > 75:
+                emergency_parts = [
+                    emergency_identity
+                ]
                 emergency_title = (
-                    TitleGenerator.limit_length(
-                        emergency_title,
-                        75,
-                    )
+                    emergency_identity
                 )
 
             blocked_words = (
                 TitleGenerator.check_blocked_words(
                     emergency_title
+                )
+            )
+
+            emergency_compatibility_present = bool(
+                not compatibility_full
+                or
+                (
+                    emergency_compatibility
+                    and
+                    emergency_compatibility.casefold()
+                    in
+                    emergency_title.casefold()
                 )
             )
 
@@ -916,30 +1370,23 @@ class TitleGenerator:
                     "compatibility_required":
                         bool(compatibility_full),
                     "compatibility_present":
-                        bool(
-                            not compatibility_full
-                            or
-                            (
-                                compatibility_first_brand
-                                and
-                                compatibility_first_brand.casefold()
-                                in
-                                emergency_title.casefold()
-                            )
-                            or
-                            (
-                                compatibility_full
-                                and
-                                compatibility_full.casefold()
-                                in
-                                emergency_title.casefold()
-                            )
-                        ),
+                        emergency_compatibility_present,
                     "hard_constraints_ok":
                         False,
                     "hard_constraint_errors": [
                         "mandatory_core_exceeds_75_characters"
-                    ],
+                    ]
+                    +
+                    (
+                        ["compatibility_missing"]
+                        if (
+                            compatibility_full
+                            and
+                            not emergency_compatibility_present
+                        )
+                        else
+                        []
+                    ),
                     "compliance_ok":
                         len(blocked_words)
                         ==
@@ -952,7 +1399,7 @@ class TitleGenerator:
                 "brand_check":
                     "failed",
                 "generator_version":
-                    "V4.0-final-title-constraint-solver",
+                    "V5.0-source-preservation-final-audit",
                 "budget_parts":
                     emergency_parts,
                 "accepted_candidates":
@@ -1205,6 +1652,29 @@ class TitleGenerator:
             "B",
             68,
             "candidate_facts.locked_secondary_models",
+        )
+
+        # =================================================
+        # V5 Source Fact Preservation
+        #
+        # High-confidence alphanumeric identifiers and specifications are
+        # exact source facts. They may safely re-enter the candidate reservoir
+        # even if an earlier AI layer failed to classify them.
+        #
+        # Source context phrases are NOT auto-added here; those still require
+        # Title Strategy semantic evaluation to avoid importing seller brands
+        # or low-value wording.
+        # =================================================
+
+        add_many(
+            candidate_facts.get(
+                "source_identifier_candidates",
+                [],
+            ),
+            "MODEL",
+            "B",
+            72,
+            "candidate_facts.source_identifier_candidates",
         )
 
         add_many(
@@ -1468,6 +1938,145 @@ class TitleGenerator:
             )
 
 
+        def compact_novel_fragment(
+            text_value,
+            current_parts,
+        ):
+            """
+            When a phrase repeats a large part of the existing title but adds
+            a small verified fact, keep only the genuinely new fragment.
+
+            Example:
+            "Pickup Pole Spacing 52mm" after "Guitar Humbucker Pickup"
+            -> "Pole Spacing 52mm"
+
+            This is deterministic extraction from the verified candidate text,
+            not generation of new facts.
+            """
+
+            candidate_signature = semantic_signature(
+                text_value
+            )
+
+            existing_signature = set()
+
+            for current_part in current_parts:
+                existing_signature.update(
+                    semantic_signature(
+                        current_part
+                    )
+                )
+
+            if (
+                not candidate_signature
+                or
+                not existing_signature
+            ):
+                return ""
+
+            overlap = (
+                candidate_signature
+                &
+                existing_signature
+            )
+
+            novel = (
+                candidate_signature
+                -
+                existing_signature
+            )
+
+            if not novel:
+                return ""
+
+            overlap_ratio = (
+                len(overlap)
+                /
+                max(
+                    1,
+                    len(candidate_signature),
+                )
+            )
+
+            if overlap_ratio < 0.25:
+                return ""
+
+            generic_novel = {
+                "part",
+                "parts",
+                "accessory",
+                "accessories",
+                "replacement",
+                "spare",
+                "system",
+                "mechanism",
+                "control",
+                "button",
+                "construction",
+                "component",
+                "device",
+                "equipment",
+                "machine",
+                "model",
+                "number",
+            }
+
+            if novel.issubset(
+                generic_novel
+            ):
+                return ""
+
+            original_tokens = re.findall(
+                r"[A-Za-z0-9]+(?:[-/×x][A-Za-z0-9]+)*",
+                normalize_text(
+                    text_value
+                ),
+            )
+
+            fragment_tokens = []
+
+            for token in original_tokens:
+                token_signature = semantic_signature(
+                    token
+                )
+
+                if (
+                    token_signature
+                    and
+                    token_signature
+                    &
+                    novel
+                ):
+                    fragment_tokens.append(
+                        token
+                    )
+
+            fragment = normalize_text(
+                " ".join(
+                    fragment_tokens
+                )
+            )
+
+            if not fragment:
+                return ""
+
+            # A single generic word is not useful as a title fragment.
+            fragment_signature = semantic_signature(
+                fragment
+            )
+
+            if (
+                len(fragment_signature) == 1
+                and
+                fragment_signature.issubset(
+                    generic_novel
+                )
+            ):
+                return ""
+
+            return fragment
+
+
         def choose_variant(
             item,
             current_parts,
@@ -1488,23 +2097,110 @@ class TitleGenerator:
 
             variants = []
 
-            if full_text:
-                variants.append(
-                    (
-                        full_text,
-                        "text",
+            for variant, source_name in (
+                (
+                    full_text,
+                    "text",
+                ),
+                (
+                    short_text,
+                    "short_text",
+                ),
+            ):
+                if not variant:
+                    continue
+
+                if (
+                    variant,
+                    source_name,
+                ) in variants:
+                    continue
+
+                # If the whole phrase is already expressed, never select it.
+                if is_semantically_redundant(
+                    variant,
+                    current_parts,
+                ):
+                    continue
+
+                compact_fragment = (
+                    compact_novel_fragment(
+                        variant,
+                        current_parts,
                     )
                 )
 
-            if (
-                short_text
-                and
-                short_text != full_text
-            ):
+                variant_signature = semantic_signature(
+                    variant
+                )
+                existing_signature = set()
+
+                for current_part in current_parts:
+                    existing_signature.update(
+                        semantic_signature(
+                            current_part
+                        )
+                    )
+
+                overlap_ratio = (
+                    len(
+                        variant_signature
+                        &
+                        existing_signature
+                    )
+                    /
+                    max(
+                        1,
+                        len(
+                            variant_signature
+                        ),
+                    )
+                )
+
+                if (
+                    compact_fragment
+                    and
+                    compact_fragment
+                    !=
+                    variant
+                ):
+                    variants.append(
+                        (
+                            compact_fragment,
+                            source_name
+                            +
+                            "_semantic_compact",
+                        )
+                    )
+
+                # When at least 25% of a descriptive phrase merely repeats
+                # existing title meaning, prefer the compact novel fragment.
+                # If no useful novel fragment exists, drop the phrase instead
+                # of keeping duplicated wording. Identifier candidates remain
+                # exempt because their exact surface form may be selection-
+                # critical.
+                if (
+                    overlap_ratio >= 0.25
+                    and
+                    item.get(
+                        "type",
+                        ""
+                    )
+                    not in {
+                        "MODEL",
+                        "PART_NUMBER",
+                    }
+                ):
+                    if compact_fragment:
+                        continue
+
+                    # no useful new fragment -> reject the verbose phrase
+                    continue
+
                 variants.append(
                     (
-                        short_text,
-                        "short_text",
+                        variant,
+                        source_name,
                     )
                 )
 
@@ -1615,6 +2311,35 @@ class TitleGenerator:
 
         for item in pool:
 
+            # V4.1 semantic union de-duplication.
+            #
+            # Do not allow a candidate to repackage facts already present
+            # across multiple title parts merely to consume characters.
+            # Exact identifiers are the only exception because a model/part
+            # number may legitimately overlap surrounding descriptive text.
+            if (
+                item["type"]
+                not in {
+                    "MODEL",
+                    "PART_NUMBER",
+                }
+                and
+                is_semantically_redundant(
+                    item[
+                        "text"
+                    ],
+                    title_parts,
+                )
+            ):
+                rejected_items.append(
+                    {
+                        **item,
+                        "reason":
+                            "semantic_redundancy",
+                    }
+                )
+                continue
+
             gain = information_gain(
                 item[
                     "text"
@@ -1622,7 +2347,7 @@ class TitleGenerator:
                 title_parts,
             )
 
-            # Keep models/part numbers even when token-overlap is high.
+            # Candidates with zero incremental meaning are not used in pass 1.
             if (
                 gain <= 0
                 and
@@ -1764,13 +2489,30 @@ class TitleGenerator:
                 if not selected_text:
                     continue
 
-                # Avoid exact duplicate phrase only.
-                if norm_key(
-                    selected_text
-                ) in {
-                    norm_key(part)
-                    for part in title_parts
-                }:
+                # V4.1: minimum-length completion must still add genuinely
+                # new meaning. Never repeat existing material/specification/
+                # identity words just to reach 61 characters.
+                if (
+                    norm_key(
+                        selected_text
+                    )
+                    in {
+                        norm_key(part)
+                        for part in title_parts
+                    }
+                    or
+                    is_semantically_redundant(
+                        selected_text,
+                        title_parts,
+                    )
+                ):
+                    rejected_items.append(
+                        {
+                            **item,
+                            "reason":
+                                "semantic_redundancy_minimum_length",
+                        }
+                    )
                     continue
 
                 title_parts.append(
@@ -1914,19 +2656,215 @@ class TitleGenerator:
             )
         )
 
+        # V5 final brand/qualifier audit.
+        #
+        # A third-party brand appearing naked is NOT enough.
+        # We distinguish:
+        # - brand missing
+        # - compatibility qualifier missing
+        # - full compatibility phrase present
+        compatibility_brand_present = (
+            True
+            if not compatibility_required
+            else
+            any(
+                normalize_text(
+                    brand
+                ).casefold()
+                in
+                title_fold
+                for brand
+                in compatibility_brands
+                if normalize_text(
+                    brand
+                )
+            )
+        )
+
+        compatibility_qualifier_present = (
+            True
+            if not compatibility_required
+            else
+            compatibility_present
+        )
+
+        compatibility_repair_required = bool(
+            compatibility_required
+            and
+            (
+                not compatibility_brand_present
+                or
+                not compatibility_qualifier_present
+            )
+        )
+
         min_length_ok = len(title) >= 61
         max_length_ok = len(title) <= 75
 
-        insufficient_verified_facts = (
-            not min_length_ok
-            and
-            len(
-                " ".join(
-                    title_parts
+        # =================================================
+        # Distinguish true source insufficiency from pipeline fact loss.
+        #
+        # We may only declare "insufficient_verified_facts" when:
+        # - title is below 61
+        # - no actionable high-value source fact remains unresolved
+        #
+        # Otherwise the correct status is PIPELINE_FACT_LOSS.
+        # =================================================
+
+        source_evidence_block = strategy_input.get(
+            "source_evidence",
+            {},
+        )
+
+        if not isinstance(
+            source_evidence_block,
+            dict,
+        ):
+            source_evidence_block = {}
+
+        unresolved_source_facts = source_evidence_block.get(
+            "unresolved_high_value",
+            [],
+        )
+
+        if not isinstance(
+            unresolved_source_facts,
+            list,
+        ):
+            unresolved_source_facts = []
+
+        strategy_excluded_texts = [
+            normalize_text(
+                value
+            )
+            for value
+            in title_strategy.get(
+                "exclude",
+                [],
+            )
+            if normalize_text(
+                value
+            )
+        ]
+
+        def source_fact_explicitly_excluded(
+            fact_text,
+        ):
+            fact_fold = normalize_text(
+                fact_text
+            ).casefold()
+
+            if not fact_fold:
+                return True
+
+            for excluded_text in strategy_excluded_texts:
+                excluded_fold = excluded_text.casefold()
+
+                if (
+                    fact_fold
+                    in
+                    excluded_fold
+                    or
+                    excluded_fold
+                    in
+                    fact_fold
+                ):
+                    return True
+
+            return False
+
+        def source_fact_already_represented(
+            fact_text,
+        ):
+            fact_text = normalize_text(
+                fact_text
+            )
+
+            if not fact_text:
+                return True
+
+            fact_fold = fact_text.casefold()
+
+            # Exact source fact is already present.
+            if fact_fold in title_fold:
+                return True
+
+            # Multi-word source evidence may be represented through a
+            # normalized wording. Consider it represented only when most
+            # meaningful words survive; this prevents false PIPELINE_FACT_LOSS
+            # for harmless grammar normalization while still catching missing
+            # context such as "Conveyor Track" / "Edgebanding Machine".
+            fact_words = [
+                word.casefold()
+                for word in re.findall(
+                    r"[A-Za-z0-9]+(?:[-/+.][A-Za-z0-9]+)*",
+                    fact_text,
+                )
+                if (
+                    len(word) >= 3
+                    and
+                    word.casefold()
+                    not in {
+                        "for",
+                        "with",
+                        "and",
+                        "the",
+                        "parts",
+                        "part",
+                        "spare",
+                        "accessories",
+                        "accessory",
+                    }
+                )
+            ]
+
+            if not fact_words:
+                return True
+
+            represented_count = sum(
+                1
+                for word in fact_words
+                if word in title_fold
+            )
+
+            return (
+                represented_count
+                /
+                len(fact_words)
+            ) >= 0.70
+
+
+        actionable_unresolved_source_facts = [
+            normalize_text(
+                fact
+            )
+            for fact
+            in unresolved_source_facts
+            if (
+                normalize_text(
+                    fact
+                )
+                and
+                not source_fact_explicitly_excluded(
+                    fact
+                )
+                and
+                not source_fact_already_represented(
+                    fact
                 )
             )
-            <
-            61
+        ]
+
+        pipeline_fact_loss = bool(
+            not min_length_ok
+            and
+            actionable_unresolved_source_facts
+        )
+
+        insufficient_verified_facts = bool(
+            not min_length_ok
+            and
+            not pipeline_fact_loss
         )
 
         blocked_words = (
@@ -1938,14 +2876,18 @@ class TitleGenerator:
         hard_constraint_errors = []
 
         if not min_length_ok:
-            hard_constraint_errors.append(
-                (
+            if pipeline_fact_loss:
+                hard_constraint_errors.append(
+                    "pipeline_fact_loss"
+                )
+            elif insufficient_verified_facts:
+                hard_constraint_errors.append(
                     "insufficient_verified_facts"
-                    if insufficient_verified_facts
-                    else
+                )
+            else:
+                hard_constraint_errors.append(
                     "title_below_61_characters"
                 )
-            )
 
         if not max_length_ok:
             hard_constraint_errors.append(
@@ -1957,14 +2899,17 @@ class TitleGenerator:
                 "identity_missing"
             )
 
-        if (
-            compatibility_required
-            and
-            not compatibility_present
-        ):
-            hard_constraint_errors.append(
-                "compatibility_missing"
-            )
+        if compatibility_required:
+
+            if not compatibility_brand_present:
+                hard_constraint_errors.append(
+                    "compatibility_brand_missing"
+                )
+
+            elif not compatibility_qualifier_present:
+                hard_constraint_errors.append(
+                    "compatibility_qualifier_missing"
+                )
 
         # Record non-selected model/part candidates.
         for item in pool:
@@ -2018,6 +2963,21 @@ class TitleGenerator:
                 "compatibility_present":
                     compatibility_present,
 
+                "compatibility_brand_present":
+                    compatibility_brand_present,
+
+                "compatibility_qualifier_present":
+                    compatibility_qualifier_present,
+
+                "compatibility_repair_required":
+                    compatibility_repair_required,
+
+                "pipeline_fact_loss":
+                    pipeline_fact_loss,
+
+                "actionable_unresolved_source_facts":
+                    actionable_unresolved_source_facts,
+
                 "hard_constraints_ok":
                     len(
                         hard_constraint_errors
@@ -2051,7 +3011,7 @@ class TitleGenerator:
                 ),
 
             "generator_version":
-                "V4.0-final-title-constraint-solver",
+                "V5.0-source-preservation-final-audit",
 
             "budget_parts":
                 title_parts,
@@ -2082,10 +3042,15 @@ class TitleGenerator:
                         0
                         else
                         (
-                            "insufficient_verified_facts"
-                            if insufficient_verified_facts
+                            "pipeline_fact_loss"
+                            if pipeline_fact_loss
                             else
-                            "constraint_unresolved"
+                            (
+                                "insufficient_verified_facts"
+                                if insufficient_verified_facts
+                                else
+                                "constraint_unresolved"
+                            )
                         )
                     ),
 
