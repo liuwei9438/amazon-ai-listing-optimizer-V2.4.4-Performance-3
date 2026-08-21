@@ -19,7 +19,7 @@ class StrategyInputBuilder:
     - 不做 Candidate 排序
     """
 
-    SCHEMA_VERSION = "1.1-hard-title-constraints"
+    SCHEMA_VERSION = "2.0-source-evidence-aware"
 
     @staticmethod
     def _dict(
@@ -177,6 +177,51 @@ class StrategyInputBuilder:
             StrategyInputBuilder._dict(
                 product_knowledge.get(
                     "compliance",
+                    {},
+                )
+            )
+        )
+
+        source_fact_ledger = (
+            StrategyInputBuilder._dict(
+                profile.get(
+                    "source_fact_ledger",
+                    {},
+                )
+            )
+        )
+
+        source_fact_audit = (
+            StrategyInputBuilder._dict(
+                profile.get(
+                    "source_fact_audit",
+                    {},
+                )
+            )
+        )
+
+        source_snapshot = (
+            StrategyInputBuilder._dict(
+                source_fact_ledger.get(
+                    "source_snapshot",
+                    {},
+                )
+            )
+        )
+
+        source_high_confidence = (
+            StrategyInputBuilder._dict(
+                source_fact_ledger.get(
+                    "high_confidence",
+                    {},
+                )
+            )
+        )
+
+        source_evidence = (
+            StrategyInputBuilder._dict(
+                source_fact_ledger.get(
+                    "source_evidence",
                     {},
                 )
             )
@@ -390,6 +435,52 @@ class StrategyInputBuilder:
                             [],
                         )
                     ),
+
+                # Source Fact Preservation V2.0
+                #
+                # These facts come directly from the original collected data.
+                # They are NOT automatically selected for the title.
+                # Strategy must classify value/meaning, but may not silently
+                # ignore them when they are high-value and source-supported.
+                "source_identifier_candidates":
+                    StrategyInputBuilder._list(
+                        source_high_confidence.get(
+                            "identifier_candidates",
+                            [],
+                        )
+                    ),
+
+                "source_specifications":
+                    StrategyInputBuilder._list(
+                        source_high_confidence.get(
+                            "specifications",
+                            [],
+                        )
+                    ),
+
+                "source_title_segments":
+                    StrategyInputBuilder._list(
+                        source_evidence.get(
+                            "title_segments",
+                            [],
+                        )
+                    ),
+
+                "source_for_phrases":
+                    StrategyInputBuilder._list(
+                        source_evidence.get(
+                            "for_phrases",
+                            [],
+                        )
+                    ),
+
+                "unresolved_source_facts":
+                    StrategyInputBuilder._list(
+                        source_fact_audit.get(
+                            "unresolved_high_value",
+                            [],
+                        )
+                    ),
             },
 
             # -----------------------------------------
@@ -501,6 +592,111 @@ class StrategyInputBuilder:
             },
 
             # -----------------------------------------
+            # Source Evidence / Coverage Audit
+            #
+            # This exists specifically to prevent PIPELINE_FACT_LOSS.
+            # It is evidence, not pre-approved title copy.
+            # -----------------------------------------
+
+            "source_evidence": {
+                "raw_title":
+                    StrategyInputBuilder._text(
+                        source_snapshot.get(
+                            "title",
+                            "",
+                        )
+                    ),
+
+                "source_title_segments":
+                    StrategyInputBuilder._list(
+                        source_evidence.get(
+                            "title_segments",
+                            [],
+                        )
+                    ),
+
+                "source_for_phrases":
+                    StrategyInputBuilder._list(
+                        source_evidence.get(
+                            "for_phrases",
+                            [],
+                        )
+                    ),
+
+                "identifier_candidates":
+                    StrategyInputBuilder._list(
+                        source_high_confidence.get(
+                            "identifier_candidates",
+                            [],
+                        )
+                    ),
+
+                "identifier_candidates_from_title":
+                    StrategyInputBuilder._list(
+                        source_high_confidence.get(
+                            "identifier_candidates_from_title",
+                            [],
+                        )
+                    ),
+
+                "specifications":
+                    StrategyInputBuilder._list(
+                        source_high_confidence.get(
+                            "specifications",
+                            [],
+                        )
+                    ),
+
+                "quantities":
+                    StrategyInputBuilder._list(
+                        source_high_confidence.get(
+                            "quantities",
+                            [],
+                        )
+                    ),
+
+                "unresolved_identifiers":
+                    StrategyInputBuilder._list(
+                        source_fact_audit.get(
+                            "unresolved_identifiers",
+                            [],
+                        )
+                    ),
+
+                "unresolved_source_phrases":
+                    StrategyInputBuilder._list(
+                        source_fact_audit.get(
+                            "unresolved_source_phrases",
+                            [],
+                        )
+                    ),
+
+                "unresolved_high_value":
+                    StrategyInputBuilder._list(
+                        source_fact_audit.get(
+                            "unresolved_high_value",
+                            [],
+                        )
+                    ),
+
+                "coverage_status":
+                    StrategyInputBuilder._text(
+                        source_fact_audit.get(
+                            "coverage_status",
+                            "",
+                        )
+                    ),
+
+                "silent_drop_detected":
+                    bool(
+                        source_fact_audit.get(
+                            "silent_drop_detected",
+                            False,
+                        )
+                    ),
+            },
+
+            # -----------------------------------------
             # Compliance
             # -----------------------------------------
 
@@ -526,6 +722,28 @@ class StrategyInputBuilder:
                         compliance.get(
                             "blocked_claims",
                             [],
+                        )
+                    ),
+
+                "seller_brand":
+                    StrategyInputBuilder._text(
+                        (
+                            profile.get(
+                                "brand_info",
+                                {},
+                            )
+                            if isinstance(
+                                profile.get(
+                                    "brand_info",
+                                    {},
+                                ),
+                                dict,
+                            )
+                            else
+                            {}
+                        ).get(
+                            "seller_brand",
+                            "",
                         )
                     ),
             },
