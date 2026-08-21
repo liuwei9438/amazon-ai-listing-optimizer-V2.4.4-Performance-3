@@ -6,7 +6,7 @@ from typing import Any
 class TitleFactResolver:
     """Stable Title Pipeline V1.0: source-backed fact resolver only."""
 
-    VERSION = "stable-v1.0-fact-resolver"
+    VERSION = "stable-v1.4-fact-resolver-brand-model-separated"
     STRICT_TYPES = {
         "MODEL", "PART_NUMBER", "COMPATIBILITY_MODEL",
         "COMPATIBILITY_BRAND", "SPECIFICATION",
@@ -75,6 +75,39 @@ class TitleFactResolver:
     def resolve(profile: dict) -> dict:
         profile = profile if isinstance(profile, dict) else {}
         source = TitleFactResolver._source_text(profile)
+
+        ledger = profile.get(
+            "source_fact_ledger",
+            {},
+        )
+
+        if not isinstance(
+            ledger,
+            dict,
+        ):
+            ledger = {}
+
+        snapshot = ledger.get(
+            "source_snapshot",
+            {},
+        )
+
+        if not isinstance(
+            snapshot,
+            dict,
+        ):
+            snapshot = {}
+
+        source_title = (
+            TitleFactResolver
+            ._clean(
+                snapshot.get(
+                    "title",
+                    "",
+                )
+            )
+        )
+
         si = profile.get("title_strategy_input", {})
         si = si if isinstance(si, dict) else {}
         locked = si.get("locked", {})
@@ -104,15 +137,55 @@ class TitleFactResolver:
             traceable = (not trace) or text.casefold() in source.casefold()
             marketing = any(x in text.casefold() for x in TitleFactResolver.MARKETING)
             noisy = False
+
             if typ == "SPECIFICATION":
-                for pattern in TitleFactResolver.NOISE:
-                    for m in re.finditer(pattern, source, flags=re.I):
-                        window = source[max(0, m.start()-100):min(len(source), m.end()+140)]
-                        if text.casefold() in window.casefold():
-                            noisy = True
+
+                occurrences = list(
+                    re.finditer(
+                        re.escape(text),
+                        source,
+                        flags=re.IGNORECASE,
+                    )
+                )
+
+                if occurrences:
+
+                    clean_occurrence_found = False
+
+                    for occurrence in occurrences:
+
+                        window = source[
+                            max(
+                                0,
+                                occurrence.start()
+                                -
+                                70,
+                            )
+                            :
+                            min(
+                                len(source),
+                                occurrence.end()
+                                +
+                                100,
+                            )
+                        ]
+
+                        occurrence_is_noise = any(
+                            re.search(
+                                pattern,
+                                window,
+                                flags=re.IGNORECASE,
+                            )
+                            for pattern
+                            in
+                            TitleFactResolver.NOISE
+                        )
+
+                        if not occurrence_is_noise:
+                            clean_occurrence_found = True
                             break
-                    if noisy:
-                        break
+
+                    noisy = not clean_occurrence_found
 
             row = {
                 "fact_id": f"F{seq:03d}", "text": text, "type": typ,
@@ -145,27 +218,131 @@ class TitleFactResolver:
         if isinstance(identity, dict):
             add(identity.get("text"), "IDENTITY", 95, True, "locked.identity.text", False)
 
-        for brand in compat.get("brands", []) or []:
-            add(brand, "COMPATIBILITY_BRAND", 90, True, "compatibility_facts.brands")
+        compatible_brands = [
+            TitleFactResolver._clean(x)
+            for x in (compat.get("brands", []) or [])
+            if TitleFactResolver._clean(x)
+        ]
+
+        for index, brand in enumerate(compatible_brands):
+            add(
+                brand,
+                "COMPATIBILITY_BRAND",
+                90 if index == 0 else 66,
+                index == 0,
+                "compatibility_facts.brands",
+            )
 
         models = locked.get("models", {})
         if isinstance(models, dict):
             primary = TitleFactResolver._clean(models.get("primary"))
             if primary:
                 add(primary, "MODEL", 85, True, "locked.models.primary")
+            compatibility_model_literals = {
+                TitleFactResolver._clean(value).casefold()
+                for value in (
+                    (compat.get("models", []) or [])
+                    +
+                    (compat.get("part_numbers", []) or [])
+                )
+                if TitleFactResolver._clean(value)
+            }
+
+            def likely_leading_year(value):
+                value = TitleFactResolver._clean(value)
+
+                if not re.fullmatch(
+                    r"20\d{2}",
+                    value,
+                ):
+                    return False
+
+                if (
+                    value.casefold()
+                    in
+                    compatibility_model_literals
+                ):
+                    return False
+
+                return (
+                    source_title.casefold()
+                    .startswith(
+                        value.casefold()
+                        +
+                        " "
+                    )
+                )
+
             for x in models.get("secondary", []) or []:
-                add(x, "MODEL", 78, False, "locked.models.secondary")
+
+                if likely_leading_year(x):
+                    continue
+
+                add(
+                    x,
+                    "MODEL",
+                    78,
+                    False,
+                    "locked.models.secondary",
+                )
+
             for x in models.get("all", []) or []:
-                add(x, "MODEL", 72, False, "locked.models.all")
+
+                if likely_leading_year(x):
+                    continue
+
+                add(
+                    x,
+                    "MODEL",
+                    72,
+                    False,
+                    "locked.models.all",
+                )
 
         for x in compat.get("models", []) or []:
             add(x, "COMPATIBILITY_MODEL", 80, False, "compatibility_facts.models")
         for x in compat.get("part_numbers", []) or []:
             add(x, "PART_NUMBER", 82, False, "compatibility_facts.part_numbers")
-        for x in compat.get("important_compatibility", []) or []:
+        compatible_brand_literals = {
+            TitleFactResolver._clean(value).casefold()
+            for value in (
+                compat.get(
+                    "brands",
+                    [],
+                )
+                or
+                []
+            )
+            if TitleFactResolver._clean(value)
+        }
+
+        for x in compat.get(
+            "important_compatibility",
+            [],
+        ) or []:
+
             t = TitleFactResolver._clean(x)
-            if re.fullmatch(r"[A-Za-z0-9._/+*-]+", t):
-                add(t, "COMPATIBILITY_MODEL", 74, False, "compatibility_facts.important_compatibility")
+
+            if (
+                not t
+                or
+                t.casefold()
+                in
+                compatible_brand_literals
+            ):
+                continue
+
+            if re.fullmatch(
+                r"[A-Za-z0-9._/+*-]+",
+                t,
+            ):
+                add(
+                    t,
+                    "COMPATIBILITY_MODEL",
+                    74,
+                    False,
+                    "compatibility_facts.important_compatibility",
+                )
 
         for field in ("source_specifications", "important_specifications", "specifications"):
             for x in cf.get(field, []) or []:
@@ -182,6 +359,114 @@ class TitleFactResolver:
         ):
             for x in cf.get(field, []) or []:
                 add(x, typ, priority, False, f"candidate_facts.{field}", True)
+
+        # Remove scalar sub-specifications when the same value is already
+        # contained inside a more complete approved specification.
+        #
+        # Example:
+        # "15 × 8 × 4cm" + "4cm"
+        # Keep the complete dimension; suppress standalone "4cm".
+        specification_facts = [
+            fact
+            for fact in approved
+            if fact.get(
+                "type"
+            )
+            ==
+            "SPECIFICATION"
+        ]
+
+        redundant_fact_ids = set()
+
+        for fact in specification_facts:
+
+            text_value = (
+                TitleFactResolver
+                ._clean(
+                    fact.get(
+                        "text"
+                    )
+                )
+            )
+
+            if not re.fullmatch(
+                r"\d+(?:\.\d+)?\s*(?:mm|cm|m|in|inch|V|W|KW)",
+                text_value,
+                flags=re.IGNORECASE,
+            ):
+                continue
+
+            for other in specification_facts:
+
+                if (
+                    other.get(
+                        "fact_id"
+                    )
+                    ==
+                    fact.get(
+                        "fact_id"
+                    )
+                ):
+                    continue
+
+                other_text = (
+                    TitleFactResolver
+                    ._clean(
+                        other.get(
+                            "text"
+                        )
+                    )
+                )
+
+                if (
+                    len(
+                        other_text
+                    )
+                    >
+                    len(
+                        text_value
+                    )
+                    and
+                    text_value.casefold()
+                    in
+                    other_text.casefold()
+                ):
+                    redundant_fact_ids.add(
+                        fact.get(
+                            "fact_id"
+                        )
+                    )
+                    break
+
+        if redundant_fact_ids:
+
+            retained = []
+
+            for fact in approved:
+
+                if (
+                    fact.get(
+                        "fact_id"
+                    )
+                    in
+                    redundant_fact_ids
+                ):
+                    rejected_fact = {
+                        **fact,
+                        "rejection_reason":
+                            "REDUNDANT_SUBSPEC",
+                    }
+
+                    rejected.append(
+                        rejected_fact
+                    )
+
+                else:
+                    retained.append(
+                        fact
+                    )
+
+            approved = retained
 
         return {
             "version": TitleFactResolver.VERSION,
