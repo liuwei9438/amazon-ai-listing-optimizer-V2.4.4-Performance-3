@@ -41,6 +41,14 @@ from .identifier_classifier import (
     IdentifierClassificationError,
 )
 
+from core.source_fact_extractor import (
+    SourceFactExtractor,
+)
+
+from core.source_fact_reconciler import (
+    SourceFactReconciler,
+)
+
 
 
 class UnderstandingError(
@@ -400,6 +408,20 @@ class ProductUnderstandingEngine:
     ) -> dict[str, Any]:
 
 
+        # =================================================
+        # Source Fact Preservation
+        #
+        # Build a deterministic source ledger BEFORE AI understanding.
+        # AI may classify facts, but cannot make them disappear.
+        # =================================================
+
+        source_fact_ledger = (
+            SourceFactExtractor.extract(
+                record
+            )
+        )
+
+
         expected_lock = build_fact_lock(
             record
         )
@@ -412,6 +434,8 @@ class ProductUnderstandingEngine:
             expected_lock,
 
             empty_profile(),
+
+            source_fact_ledger=source_fact_ledger,
 
         )
 
@@ -454,6 +478,22 @@ class ProductUnderstandingEngine:
 
         profile = sanitize_seller_brand_contamination(
             profile
+        )
+
+
+        # =================================================
+        # Source Fact Ledger + Reconciliation
+        # =================================================
+
+        profile[
+            "source_fact_ledger"
+        ] = source_fact_ledger
+
+        profile[
+            "source_fact_audit"
+        ] = SourceFactReconciler.reconcile(
+            profile,
+            source_fact_ledger,
         )
 
 
@@ -540,6 +580,18 @@ class ProductUnderstandingEngine:
 
         )
 
+
+
+        # =================================================
+        # Final Source Fact Reconciliation
+        # =================================================
+
+        profile[
+            "source_fact_audit"
+        ] = SourceFactReconciler.reconcile(
+            profile,
+            source_fact_ledger,
+        )
 
 
         # =================================================
