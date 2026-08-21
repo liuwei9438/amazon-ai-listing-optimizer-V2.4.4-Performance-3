@@ -25,7 +25,7 @@ class SourceFactExtractor:
     They must not silently disappear.
     """
 
-    SCHEMA_VERSION = "1.0-source-fact-ledger"
+    SCHEMA_VERSION = "2.0-source-fact-ledger-noise-firewall"
 
     MARKETING_TERMS = {
         "wholesale",
@@ -185,6 +185,30 @@ class SourceFactExtractor:
             # Quantities such as 10PCS are not model identifiers.
             if re.fullmatch(
                 r"\d+\s*(?:pcs?|pieces?|piece|sets?)",
+                token,
+                flags=re.IGNORECASE,
+            ):
+                continue
+
+            # V2 Noise Firewall:
+            # Do not preserve instruction numbering, measurement tolerances,
+            # or obvious source-note fragments as model/part candidates.
+            if re.fullmatch(
+                r"\d+\.(?:please|the|technical|note|due)",
+                token,
+                flags=re.IGNORECASE,
+            ):
+                continue
+
+            if re.fullmatch(
+                r"\d+(?:[-–—]\d+)+(?:mm|cm|m|in|inch)?",
+                token,
+                flags=re.IGNORECASE,
+            ):
+                continue
+
+            if re.fullmatch(
+                r"\d+(?:\.\d+)?(?:mm|cm|m|in|inch)",
                 token,
                 flags=re.IGNORECASE,
             ):
