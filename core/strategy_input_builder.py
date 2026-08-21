@@ -19,7 +19,7 @@ class StrategyInputBuilder:
     - 不做 Candidate 排序
     """
 
-    SCHEMA_VERSION = "2.0-source-evidence-aware"
+    SCHEMA_VERSION = "3.0-final-title-composer-input"
 
     @staticmethod
     def _dict(
@@ -119,6 +119,33 @@ class StrategyInputBuilder:
             StrategyInputBuilder._dict(
                 normalized.get(
                     "models",
+                    {},
+                )
+            )
+        )
+
+        profile_compatibility = (
+            StrategyInputBuilder._dict(
+                profile.get(
+                    "compatibility",
+                    {},
+                )
+            )
+        )
+
+        profile_title_information = (
+            StrategyInputBuilder._dict(
+                profile.get(
+                    "title_information",
+                    {},
+                )
+            )
+        )
+
+        profile_brand_info = (
+            StrategyInputBuilder._dict(
+                profile.get(
+                    "brand_info",
                     {},
                 )
             )
@@ -249,8 +276,25 @@ class StrategyInputBuilder:
                 "max_length": 75,
                 "identity_required": True,
                 "compatibility_required_when_present": True,
+                "primary_model_required_when_present": True,
                 "no_invented_filler": True,
+                "no_model_range_compression": True,
+                "language_aware_word_order": True,
             },
+
+            "target_language": (
+                StrategyInputBuilder._text(
+                    profile.get(
+                        "target_language",
+                        profile.get(
+                            "language",
+                            "English",
+                        ),
+                    )
+                )
+                or
+                "English"
+            ),
 
             # -----------------------------------------
             # Locked decisions
@@ -326,6 +370,44 @@ class StrategyInputBuilder:
                             )
                         ),
                 },
+            },
+
+            # -----------------------------------------
+            # Compatibility facts
+            #
+            # Brand compatibility and model compatibility are separate.
+            # Pure numeric compatible models are preserved here.
+            # -----------------------------------------
+
+            "compatibility_facts": {
+                "brands":
+                    StrategyInputBuilder._list(
+                        profile_compatibility.get("brands", [])
+                    ),
+                "models":
+                    StrategyInputBuilder._list(
+                        profile_compatibility.get("models", [])
+                    ),
+                "part_numbers":
+                    StrategyInputBuilder._list(
+                        profile_compatibility.get("part_numbers", [])
+                    ),
+                "notes":
+                    StrategyInputBuilder._list(
+                        profile_compatibility.get("compatibility_notes", [])
+                    ),
+                "important_compatibility":
+                    StrategyInputBuilder._list(
+                        profile_title_information.get("important_compatibility", [])
+                    ),
+                "third_party_brands":
+                    StrategyInputBuilder._list(
+                        profile_brand_info.get("third_party_brands", [])
+                    ),
+                "seller_brand":
+                    StrategyInputBuilder._text(
+                        profile_brand_info.get("seller_brand", "")
+                    ),
             },
 
             # -----------------------------------------
@@ -480,6 +562,21 @@ class StrategyInputBuilder:
                             "unresolved_high_value",
                             [],
                         )
+                    ),
+
+                "compatibility_models":
+                    StrategyInputBuilder._list(
+                        profile_compatibility.get("models", [])
+                    ),
+
+                "compatibility_part_numbers":
+                    StrategyInputBuilder._list(
+                        profile_compatibility.get("part_numbers", [])
+                    ),
+
+                "important_compatibility":
+                    StrategyInputBuilder._list(
+                        profile_title_information.get("important_compatibility", [])
                     ),
             },
 
