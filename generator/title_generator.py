@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import re
 
-from generator.candidate_budget import CandidateBudgetEngine
-
 
 class TitleGenerator:
+    """
+    V6.0 Final Title Validator
 
+    Architecture:
+    - AI Title Strategy already composes the complete final_title.
+    - This module NEVER semantically rewrites/crops candidate phrases.
+    - It validates hard requirements and exposes exact failure reasons.
+    """
+
+    VERSION = "V6.0-ai-composer-deterministic-validator"
 
     BLOCKED_WORDS = [
-        "best",
         "best seller",
         "#1",
         "premium",
@@ -17,280 +23,269 @@ class TitleGenerator:
         "genuine",
         "official",
         "authentic",
-        "hot sale",
-        "discount",
-        "promotion",
         "oem",
     ]
 
-
-    IGNORED_ATTRIBUTES = [
-        "PP",
-        "ABS",
-        "plastic",
-        "metal",
-        "stainless steel",
-    ]
     @staticmethod
-    def add_budget_part(
-        title_parts,
-        text,
-        max_length=75,
-        required=False,
-    ):
-        """
-        将一个候选标题元素加入 title_parts。
+    def _clean(value) -> str:
+        if value is None:
+            return ""
 
-        统一负责：
-
-        1. 空值过滤
-        2. 完全重复过滤
-        3. 语义包含重复过滤
-        4. 75字符预算检查
-        5. required 信息保护
-
-        返回：
-            True  -> 已加入
-            False -> 未加入
-        """
-
-        if text is None:
-            return False
-
-
-        text = str(
-            text
+        return re.sub(
+            r"\s+",
+            " ",
+            str(value),
         ).strip()
 
-
-        if not text:
-            return False
-
-
-        # ==========================================
-        # 1. 完全重复检查
-        # ==========================================
-
-        for existing in title_parts:
-
-            if (
-                str(existing)
-                .strip()
-                .lower()
-                ==
-                text.lower()
-            ):
-
-                return False
-
-
-        # ==========================================
-        # 2. 语义包含检查
-        #
-        # 例如：
-        #
-        # 已有：
-        # 9D Floating Head Shaver
-        #
-        # 新：
-        # 9D Floating Head
-        #
-        # 不再重复加入。
-        # ==========================================
-
-        if TitleGenerator.is_contained_information(
-            text,
-            title_parts,
-        ):
-
-            return False
-
-
-        # ==========================================
-        # 3. 计算加入后的标题长度
-        # ==========================================
-
-        candidate_parts = (
-            list(title_parts)
-            +
-            [text]
-        )
-
-
-        candidate_title = " ".join(
-            str(item).strip()
-            for item in candidate_parts
-            if str(item).strip()
-        )
-
-
-        # ==========================================
-        # 4. 预算检查
-        # ==========================================
-
-        if len(candidate_title) <= max_length:
-
-            title_parts.append(
-                text
-            )
-
-            return True
-
-
-        # ==========================================
-        # 5. Required
-        #
-        # required=True 不代表强行超过75字符。
-        #
-        # 它表示：
-        # 这是高价值信息，但当前剩余预算不足。
-        #
-        # 先返回False。
-        # 后续V2第二阶段会加入：
-        # lower priority replacement。
-        # ==========================================
-
-        if required:
-
-            return False
-
-
-        return False
     @staticmethod
-    def is_contained_information(
-        new_text,
-        existing_parts,
-    ):
-        """
-        判断候选信息是否已经被已有标题表达。
+    def _list(value) -> list[str]:
+        if not isinstance(value, list):
+            return []
 
-        只做通用文本包含判断，
-        不包含具体产品规则。
-        """
+        result = []
+        seen = set()
 
-        if not new_text:
-            return False
+        for item in value:
+            item = TitleGenerator._clean(item)
 
-
-        def normalize_words(text):
-
-            words = re.findall(
-                r"[A-Za-z0-9\-]+",
-                str(text).lower(),
-            )
-
-
-            ignore_words = {
-                "with",
-                "for",
-                "and",
-                "the",
-                "a",
-                "an",
-            }
-
-
-            result = set()
-
-
-            for word in words:
-
-                if not word:
-                    continue
-
-
-                if word in ignore_words:
-                    continue
-
-
-                # 轻量单复数归一化
-                # heads -> head
-                # buttons -> button
-                if (
-                    len(word) > 4
-                    and
-                    word.endswith("s")
-                    and
-                    not word.endswith(
-                        (
-                            "ss",
-                            "us",
-                            "is",
-                        )
-                    )
-                ):
-
-                    word = word[:-1]
-
-
-                result.add(
-                    word
-                )
-
-
-            return result
-
-
-        new_words = normalize_words(
-            new_text
-        )
-
-
-        if not new_words:
-            return False
-
-
-        for existing in existing_parts:
-
-            existing_words = normalize_words(
-                existing
-            )
-
-
-            if not existing_words:
+            if not item:
                 continue
 
+            key = item.casefold()
 
-            # 完全一致
-            if new_words == existing_words:
+            if key in seen:
+                continue
 
-                return True
+            seen.add(key)
+            result.append(item)
 
+        return result
 
-            # 新信息已经完整包含于已有信息
-            if new_words.issubset(
-                existing_words
+    @staticmethod
+    def _compact_quantity(value) -> str:
+        text = TitleGenerator._clean(value)
+
+        if not text:
+            return ""
+
+        match = re.search(
+            r"\b(\d{1,4})\s*(?:pcs?|pieces?|piece|sets?)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            return ""
+
+        try:
+            count = int(match.group(1))
+        except Exception:
+            return ""
+
+        if count <= 1:
+            return ""
+
+        return f"{count}pcs"
+
+    @staticmethod
+    def check_blocked_words(title: str) -> list[str]:
+        title_fold = TitleGenerator._clean(title).casefold()
+
+        return [
+            word
+            for word in TitleGenerator.BLOCKED_WORDS
+            if word.casefold() in title_fold
+        ]
+
+    @staticmethod
+    def _compatibility_qualifiers(language: str) -> list[str]:
+        language = TitleGenerator._clean(language).casefold()
+
+        mapping = {
+            "english": ["compatible with"],
+            "spanish": ["compatible con"],
+            "español": ["compatible con"],
+            "french": ["compatible avec"],
+            "français": ["compatible avec"],
+            "german": ["kompatibel mit"],
+            "deutsch": ["kompatibel mit"],
+            "italian": ["compatibile con"],
+            "portuguese": ["compatível com", "compativel com"],
+            "dutch": ["compatibel met"],
+            "swedish": ["kompatibel med"],
+            "japanese": ["対応", "互換"],
+        }
+
+        for key, values in mapping.items():
+            if key in language:
+                return values
+
+        return sorted(
+            {
+                item
+                for values in mapping.values()
+                for item in values
+            }
+        )
+
+    @staticmethod
+    def _identity_variants(
+        strategy: dict,
+        strategy_input: dict,
+    ) -> list[str]:
+
+        locked = (
+            strategy_input.get("locked", {})
+            if isinstance(strategy_input, dict)
+            else {}
+        )
+
+        identity = (
+            locked.get("identity", {})
+            if isinstance(locked.get("identity", {}), dict)
+            else {}
+        )
+
+        variants = [
+            TitleGenerator._clean(
+                identity.get("text", "")
+            )
+        ]
+
+        for candidate in strategy.get(
+            "title_candidates",
+            [],
+        ):
+            if not isinstance(candidate, dict):
+                continue
+
+            if TitleGenerator._clean(
+                candidate.get("type", "")
+            ).upper() != "IDENTITY":
+                continue
+
+            variants.extend(
+                [
+                    TitleGenerator._clean(
+                        candidate.get("text", "")
+                    ),
+                    TitleGenerator._clean(
+                        candidate.get("short_text", "")
+                    ),
+                ]
+            )
+
+        result = []
+
+        for value in variants:
+            if (
+                value
+                and
+                value not in result
             ):
+                result.append(value)
 
-                return True
+        return result
 
+    @staticmethod
+    def _all_verified_models(
+        profile: dict,
+        strategy_input: dict,
+    ) -> list[str]:
 
-        return False
+        result = []
+
+        def add(values):
+            if isinstance(values, list):
+                source_values = values
+            elif values:
+                source_values = [values]
+            else:
+                source_values = []
+
+            for value in source_values:
+                value = TitleGenerator._clean(value)
+
+                if (
+                    value
+                    and
+                    value not in result
+                ):
+                    result.append(value)
+
+        locked = strategy_input.get(
+            "locked",
+            {},
+        )
+
+        if isinstance(locked, dict):
+            models = locked.get(
+                "models",
+                {},
+            )
+
+            if isinstance(models, dict):
+                add(models.get("all", []))
+                add(models.get("primary", ""))
+                add(models.get("secondary", []))
+
+        compatibility_facts = strategy_input.get(
+            "compatibility_facts",
+            {},
+        )
+
+        if isinstance(compatibility_facts, dict):
+            add(
+                compatibility_facts.get(
+                    "models",
+                    [],
+                )
+            )
+            add(
+                compatibility_facts.get(
+                    "part_numbers",
+                    [],
+                )
+            )
+            add(
+                compatibility_facts.get(
+                    "important_compatibility",
+                    [],
+                )
+            )
+
+        compatibility = profile.get(
+            "compatibility",
+            {},
+        )
+
+        if isinstance(compatibility, dict):
+            add(
+                compatibility.get(
+                    "models",
+                    [],
+                )
+            )
+            add(
+                compatibility.get(
+                    "part_numbers",
+                    [],
+                )
+            )
+
+        return result
+
     @staticmethod
     def generate(
         profile: dict,
     ) -> dict:
-        """
-        V4.1 Semantic Dedup + Core Compression
-
-        Hard rules:
-        - 61 <= final title <= 75
-        - verified product IDENTITY must be present
-        - verified COMPATIBILITY must be present when available
-        - multi-unit quantity is a fixed compact prefix
-        - no invented facts
-
-        Architecture:
-        Strategy decides semantics/value.
-        This solver performs deterministic final allocation and repair.
-        """
 
         if not isinstance(profile, dict):
             raise ValueError(
                 "TitleGenerator profile must be a dictionary"
             )
 
-        title_strategy = profile.get(
+        strategy = profile.get(
             "title_strategy",
             {},
         )
@@ -300,1289 +295,67 @@ class TitleGenerator:
             {},
         )
 
-        if not isinstance(title_strategy, dict):
-            title_strategy = {}
+        if not isinstance(strategy, dict):
+            strategy = {}
 
         if not isinstance(strategy_input, dict):
             strategy_input = {}
 
-        candidates = title_strategy.get(
-            "title_candidates",
-            [],
+        title = TitleGenerator._clean(
+            strategy.get(
+                "final_title",
+                "",
+            )
         )
 
-        if not isinstance(candidates, list):
-            candidates = []
-
-        if not candidates:
+        if not title:
             raise ValueError(
-                "TitleGenerator V4 requires title_strategy.title_candidates"
+                "V6 final_title missing from title_strategy"
             )
 
-        # =================================================
-        # Helpers
-        # =================================================
+        title_fold = title.casefold()
+        errors = []
 
-        def normalize_text(value):
-            if value is None:
-                return ""
+        # -------------------------------------------------
+        # Length
+        # -------------------------------------------------
+        min_length_ok = len(title) >= 61
+        max_length_ok = len(title) <= 75
 
-            return re.sub(
-                r"\s+",
-                " ",
-                str(value).strip(),
+        if not min_length_ok:
+            errors.append(
+                "title_below_61_characters"
             )
 
-
-        def norm_key(value):
-            return normalize_text(value).casefold()
-
-
-        def words(value):
-            normalized = normalize_text(value).casefold()
-
-            # Normalize compact measurement/electrical expressions so
-            # semantically identical values such as "220 V" and "220V"
-            # receive the same token.
-            normalized = re.sub(
-                r"(?i)\b(\d+(?:\.\d+)?)\s*(mm|cm|m|v|w|kw|a|ah|mah|kg|g|lb|lbs|ft|inch|inches)\b",
-                lambda match: f"{match.group(1)}{match.group(2).lower()}",
-                normalized,
+        if not max_length_ok:
+            errors.append(
+                "title_above_75_characters"
             )
 
-            tokens = [
-                token.casefold()
-                for token in re.findall(
-                    r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)*",
-                    normalized,
-                )
-                if token
-            ]
-
-            ignore = {
-                "with",
-                "for",
-                "and",
-                "the",
-                "a",
-                "an",
-                "of",
-                "to",
-                "in",
-                "on",
-                "size",
-                "model",
-                "number",
-                "voltage",
-            }
-
-            result = []
-
-            for token in tokens:
-                if token in ignore:
-                    continue
-
-                if (
-                    len(token) > 4
-                    and
-                    token.endswith("s")
-                    and
-                    not token.endswith(("ss", "us", "is"))
-                ):
-                    token = token[:-1]
-
-                result.append(token)
-
-            return result
-
-
-        def semantic_signature(value):
-            return set(words(value))
-
-
-        def is_semantically_redundant(
-            text_value,
-            existing_parts,
-        ):
-            """
-            Reject phrases that merely restate information already present
-            elsewhere in the title, even when the words are distributed over
-            multiple existing parts.
-
-            Examples:
-            - Chain pad + Rubber -> "Rubber chain pad" is redundant.
-            - 79X72mm + Chain pad -> "79X72mm chain pad" is redundant.
-            - 220V -> "220 V" is redundant.
-            """
-
-            new_signature = semantic_signature(
-                text_value
-            )
-
-            if not new_signature:
-                return True
-
-            existing_signature = set()
-
-            for existing_part in existing_parts:
-                existing_signature.update(
-                    semantic_signature(
-                        existing_part
-                    )
-                )
-
-            if not existing_signature:
-                return False
-
-            return new_signature.issubset(
-                existing_signature
-            )
-
-
-        def compact_quantity(value):
-            text_value = normalize_text(value)
-
-            match = re.match(
-                r"^\s*(\d+)\s*(?:x|pc|pcs|piece|pieces|set|sets)?\b",
-                text_value,
-                flags=re.IGNORECASE,
-            )
-
-            if not match:
-                return ""
-
-            try:
-                count = int(
-                    match.group(1)
-                )
-            except Exception:
-                return ""
-
-            if count <= 1:
-                return ""
-
-            return f"{count}pcs"
-
-
-        def safe_number(value, default=0.0):
-            try:
-                return float(
-                    value
-                    if value is not None
-                    else default
-                )
-            except Exception:
-                return float(default)
-
-
-        def candidate_value(candidate):
-            incremental = candidate.get(
-                "incremental_value",
-                {},
-            )
-
-            if not isinstance(incremental, dict):
-                incremental = {}
-
-            adjusted_score = safe_number(
-                candidate.get(
-                    "adjusted_score",
-                    candidate.get(
-                        "final_score",
-                        0,
-                    ),
-                )
-            )
-
-            selection_value = safe_number(
-                incremental.get(
-                    "selection_value",
-                    0,
-                )
-            )
-
-            new_information = safe_number(
-                incremental.get(
-                    "new_information",
-                    0,
-                )
-            )
-
-            redundancy_penalty = safe_number(
-                incremental.get(
-                    "redundancy_penalty",
-                    0,
-                )
-            )
-
-            return (
-                adjusted_score * 0.55
-                +
-                selection_value * 0.25
-                +
-                new_information * 0.20
-                -
-                redundancy_penalty * 0.15
-            )
-
-
-        priority_rank = {
-            "S": 0,
-            "A": 1,
-            "B": 2,
-            "C": 3,
-            "D": 4,
-        }
-
-        type_rank = {
-            "IDENTITY": 0,
-            "COMPATIBILITY": 1,
-            "MODEL": 2,
-            "PART_NUMBER": 2,
-            "SPECIFICATION": 3,
-            "FEATURE": 4,
-            "MATERIAL": 4,
-            "SEARCH_TERM": 5,
-            "USAGE": 6,
-            "OTHER": 7,
-        }
-
-
-        def candidate_sort_key(item):
-            return (
-                priority_rank.get(
-                    item.get(
-                        "priority",
-                        "C",
-                    ),
-                    5,
-                ),
-                type_rank.get(
-                    item.get(
-                        "type",
-                        "OTHER",
-                    ),
-                    7,
-                ),
-                -safe_number(
-                    item.get(
-                        "value",
-                        0,
-                    )
-                ),
-                len(
-                    normalize_text(
-                        item.get(
-                            "text",
-                            "",
-                        )
-                    )
-                ),
-            )
-
-
-        # =================================================
-        # Strategy exclusions
-        # =================================================
-
-        strategy_excludes = title_strategy.get(
-            "exclude",
-            [],
-        )
-
-        if not isinstance(strategy_excludes, list):
-            strategy_excludes = []
-
-        excluded_keys = {
-            norm_key(item)
-            for item in strategy_excludes
-            if norm_key(item)
-        }
-
-
-        # =================================================
-        # Locked mandatory facts
-        # =================================================
-
-        locked = strategy_input.get(
-            "locked",
-            {},
-        )
-
-        if not isinstance(locked, dict):
-            locked = {}
-
-        locked_identity = locked.get(
-            "identity",
-            {},
-        )
-
-        if not isinstance(locked_identity, dict):
-            locked_identity = {}
-
-        locked_compatibility = locked.get(
-            "compatibility",
-            {},
-        )
-
-        if not isinstance(locked_compatibility, dict):
-            locked_compatibility = {}
-
-        locked_models = locked.get(
-            "models",
-            {},
-        )
-
-        if not isinstance(locked_models, dict):
-            locked_models = {}
-
-        identity_candidate = next(
-            (
-                candidate
-                for candidate in candidates
-                if (
-                    isinstance(candidate, dict)
-                    and
-                    normalize_text(
-                        candidate.get(
-                            "type",
-                            "",
-                        )
-                    ).upper()
-                    ==
-                    "IDENTITY"
-                )
-            ),
-            None,
-        )
-
-        compatibility_candidate = next(
-            (
-                candidate
-                for candidate in candidates
-                if (
-                    isinstance(candidate, dict)
-                    and
-                    normalize_text(
-                        candidate.get(
-                            "type",
-                            "",
-                        )
-                    ).upper()
-                    ==
-                    "COMPATIBILITY"
-                )
-            ),
-            None,
-        )
-
-        identity_full = (
-            normalize_text(
-                locked_identity.get(
-                    "text",
-                    "",
-                )
-            )
-            or
-            normalize_text(
-                (
-                    identity_candidate
-                    or
-                    {}
-                ).get(
-                    "text",
-                    "",
-                )
+        # -------------------------------------------------
+        # Identity
+        # -------------------------------------------------
+        identity_variants = (
+            TitleGenerator
+            ._identity_variants(
+                strategy,
+                strategy_input,
             )
         )
 
-        identity_short = normalize_text(
-            (
-                identity_candidate
-                or
-                {}
-            ).get(
-                "short_text",
-                "",
-            )
+        identity_present = any(
+            value.casefold() in title_fold
+            for value in identity_variants
         )
 
-        if (
-            not identity_short
-            or
-            len(identity_short)
-            >=
-            len(identity_full)
-        ):
-            identity_short = ""
-
-        compatibility_full = (
-            normalize_text(
-                locked_compatibility.get(
-                    "phrase",
-                    "",
-                )
-            )
-            or
-            normalize_text(
-                (
-                    compatibility_candidate
-                    or
-                    {}
-                ).get(
-                    "text",
-                    "",
-                )
-            )
-        )
-
-        compatibility_brands = locked_compatibility.get(
-            "brands",
-            [],
-        )
-
-        if not isinstance(compatibility_brands, list):
-            compatibility_brands = []
-
-        compatibility_brands = [
-            normalize_text(brand)
-            for brand in compatibility_brands
-            if normalize_text(brand)
-        ]
-
-        compatibility_short = normalize_text(
-            (
-                compatibility_candidate
-                or
-                {}
-            ).get(
-                "short_text",
-                "",
-            )
-        )
-
-        if (
-            compatibility_short
-            and
-            not compatibility_short.casefold().startswith(
-                "compatible with "
-            )
-        ):
-            compatibility_short = ""
-
-        # Deterministic emergency compatibility compression:
-        # keep the highest-priority first verified compatible brand.
-        compatibility_first_brand = ""
-
-        if compatibility_brands:
-            compatibility_first_brand = (
-                "Compatible with "
-                +
-                compatibility_brands[0]
+        if not identity_present:
+            errors.append(
+                "identity_missing"
             )
 
-        # =================================================
-        # Verified quantity
-        # =================================================
-
-        quantity_text = ""
-
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-
-            if normalize_text(
-                candidate.get(
-                    "type",
-                    "",
-                )
-            ).upper() != "QUANTITY":
-                continue
-
-            quantity_text = compact_quantity(
-                candidate.get(
-                    "text",
-                    "",
-                )
-            )
-
-            if quantity_text:
-                break
-
-        if not quantity_text:
-            confirmed_facts = strategy_input.get(
-                "confirmed_facts",
-                {},
-            )
-
-            if isinstance(confirmed_facts, dict):
-                quantity_text = compact_quantity(
-                    confirmed_facts.get(
-                        "quantity",
-                        "",
-                    )
-                )
-
-        # =================================================
-        # Mandatory core builder
-        # =================================================
-
-        core_variants = []
-
-        identity_variants = [
-            identity_full,
-        ]
-
-        if identity_short:
-            identity_variants.append(
-                identity_short
-            )
-
-        def add_identity_variant(value):
-            candidate = normalize_text(
-                value
-            )
-
-            # Never allow a syntactically broken identity representation.
-            candidate = re.sub(
-                r"(?i)\b(?:and|for|with|of|to)\s*$",
-                "",
-                candidate,
-            ).strip(" ,-/&")
-
-            if (
-                candidate
-                and
-                candidate not in identity_variants
-            ):
-                identity_variants.append(
-                    candidate
-                )
-
-
-        # V4.1 source-backed compression.
-        #
-        # These alternatives come only from already verified identity fields
-        # in the profile. They are not invented by the final solver.
-        identity_decision = profile.get(
-            "identity_decision",
-            {},
-        )
-
-        if not isinstance(identity_decision, dict):
-            identity_decision = {}
-
-        source_identities = identity_decision.get(
-            "source_identities",
-            {},
-        )
-
-        if not isinstance(source_identities, dict):
-            source_identities = {}
-
-        identity_source_candidates = []
-
-        for source_name in (
-            "raw_product_name",
-            "title_product_identity",
-            "knowledge_object_name",
-        ):
-            source_value = source_identities.get(
-                source_name,
-                {},
-            )
-
-            if isinstance(source_value, dict):
-                source_value = source_value.get(
-                    "text",
-                    "",
-                )
-
-            source_value = normalize_text(
-                source_value
-            )
-
-            if source_value:
-                identity_source_candidates.append(
-                    source_value
-                )
-
-        product_identity = profile.get(
-            "product_identity",
-            {},
-        )
-
-        if isinstance(product_identity, dict):
-            identity_source_candidates.append(
-                normalize_text(
-                    product_identity.get(
-                        "name",
-                        "",
-                    )
-                )
-            )
-
-        basic_info = profile.get(
-            "basic_info",
-            {},
-        )
-
-        if isinstance(basic_info, dict):
-            identity_source_candidates.append(
-                normalize_text(
-                    basic_info.get(
-                        "product_name",
-                        "",
-                    )
-                )
-            )
-
-        title_plan_for_identity = profile.get(
-            "title_plan",
-            {},
-        )
-
-        if isinstance(title_plan_for_identity, dict):
-            plan_main = title_plan_for_identity.get(
-                "main_product",
-                [],
-            )
-
-            if isinstance(plan_main, list):
-                identity_source_candidates.extend(
-                    normalize_text(value)
-                    for value in plan_main
-                    if normalize_text(value)
-                )
-
-        full_signature = semantic_signature(
-            identity_full
-        )
-
-        # Preserve a compact product-head suffix when a verified candidate
-        # drops the final product-type noun(s), e.g. "... Seesaw" -> 
-        # "... Seesaw Upgrade Kit".
-        full_tokens_original = re.findall(
-            r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)*",
-            identity_full,
-        )
-
-        head_suffix = ""
-
-        if len(full_tokens_original) >= 2:
-            last_two = " ".join(
-                full_tokens_original[-2:]
-            )
-
-            generic_head_words = {
-                "kit",
-                "valve",
-                "assembly",
-                "cover",
-                "holder",
-                "wheel",
-                "sensor",
-                "board",
-                "gasket",
-                "pad",
-                "plate",
-                "shaft",
-                "bar",
-                "hose",
-                "motor",
-                "pump",
-                "switch",
-                "filter",
-                "adapter",
-                "gearbox",
-            }
-
-            if (
-                full_tokens_original[-1].casefold()
-                in generic_head_words
-            ):
-                head_suffix = last_two
-
-        for source_candidate in identity_source_candidates:
-            source_candidate = re.sub(
-                r"(?i)\b(?:and|for|with|of|to)\s*$",
-                "",
-                source_candidate,
-            ).strip(" ,-/&")
-
-            if not source_candidate:
-                continue
-
-            source_signature = semantic_signature(
-                source_candidate
-            )
-
-            if not source_signature:
-                continue
-
-            overlap_ratio = (
-                len(
-                    source_signature
-                    &
-                    full_signature
-                )
-                /
-                max(
-                    1,
-                    len(full_signature),
-                )
-            )
-
-            # Require substantial semantic coverage of the locked identity.
-            if overlap_ratio < 0.45:
-                continue
-
-            identity_variant_value = source_candidate
-
-            if (
-                head_suffix
-                and
-                full_tokens_original
-                and
-                full_tokens_original[-1].casefold()
-                not in semantic_signature(
-                    identity_variant_value
-                )
-            ):
-                identity_variant_value = normalize_text(
-                    identity_variant_value
-                    +
-                    " "
-                    +
-                    head_suffix
-                )
-
-            add_identity_variant(
-                identity_variant_value
-            )
-
-        # Structural de-duplication for compound identities.
-        #
-        # Example:
-        # "Rear Spring Suspension Axle and Rear Spring Rubber PU Bar"
-        # ->
-        # "Rear Spring Suspension Axle & Rubber PU Bar"
-        compound_match = re.match(
-            r"^(.+?)\s+and\s+(.+)$",
-            identity_full,
-            flags=re.IGNORECASE,
-        )
-
-        if compound_match:
-            left = normalize_text(
-                compound_match.group(1)
-            )
-            right = normalize_text(
-                compound_match.group(2)
-            )
-
-            left_tokens = left.split()
-            right_tokens = right.split()
-
-            removable_prefix = 0
-
-            # Remove only a repeated prefix of the second conjunct that is
-            # already explicitly present in the first conjunct. Require at
-            # least two repeated words to avoid aggressive compression.
-            for prefix_length in range(
-                min(4, len(right_tokens)),
-                1,
-                -1,
-            ):
-                prefix = [
-                    token.casefold()
-                    for token in right_tokens[
-                        :prefix_length
-                    ]
-                ]
-
-                left_fold = [
-                    token.casefold()
-                    for token in left_tokens
-                ]
-
-                found = False
-
-                for start in range(
-                    0,
-                    max(
-                        0,
-                        len(left_fold)
-                        -
-                        prefix_length
-                        +
-                        1,
-                    ),
-                ):
-                    if (
-                        left_fold[
-                            start:
-                            start
-                            +
-                            prefix_length
-                        ]
-                        ==
-                        prefix
-                    ):
-                        found = True
-                        break
-
-                if found:
-                    removable_prefix = (
-                        prefix_length
-                    )
-                    break
-
-            if (
-                removable_prefix
-                and
-                removable_prefix
-                <
-                len(right_tokens)
-            ):
-                add_identity_variant(
-                    left
-                    +
-                    " & "
-                    +
-                    " ".join(
-                        right_tokens[
-                            removable_prefix:
-                        ]
-                    )
-                )
-
-        # Conservative syntax compression:
-        # replacing standalone "and" with "&" preserves the same product
-        # meaning while saving two characters.
-        for identity_variant_source in list(
-            identity_variants
-        ):
-            ampersand_variant = re.sub(
-                r"\band\b",
-                "&",
-                identity_variant_source,
-                flags=re.IGNORECASE,
-            )
-
-            ampersand_variant = normalize_text(
-                ampersand_variant
-            )
-
-            add_identity_variant(
-                ampersand_variant
-            )
-
-        # Shorter representations are considered only when necessary; the
-        # core sorter below still prefers the complete locked identity.
-        identity_variants = list(
-            dict.fromkeys(
-                value
-                for value in identity_variants
-                if value
-            )
-        )
-
-        compatibility_variants = [
-            compatibility_full,
-        ] if compatibility_full else [""]
-
-        if (
-            compatibility_short
-            and
-            compatibility_short not in compatibility_variants
-        ):
-            compatibility_variants.append(
-                compatibility_short
-            )
-
-        if (
-            compatibility_first_brand
-            and
-            compatibility_first_brand not in compatibility_variants
-        ):
-            compatibility_variants.append(
-                compatibility_first_brand
-            )
-
-        for identity_variant in identity_variants:
-            for compatibility_variant in compatibility_variants:
-
-                parts = [
-                    part
-                    for part in [
-                        quantity_text,
-                        identity_variant,
-                        compatibility_variant,
-                    ]
-                    if part
-                ]
-
-                title_value = " ".join(parts)
-
-                if len(title_value) <= 75:
-                    core_variants.append(
-                        {
-                            "parts":
-                                parts,
-                            "identity":
-                                identity_variant,
-                            "compatibility":
-                                compatibility_variant,
-                            "length":
-                                len(title_value),
-                            "identity_is_short":
-                                bool(
-                                    identity_variant
-                                    !=
-                                    identity_full
-                                ),
-                            "compatibility_is_compressed":
-                                bool(
-                                    compatibility_full
-                                    and
-                                    compatibility_variant
-                                    !=
-                                    compatibility_full
-                                ),
-                        }
-                    )
-
-        if not core_variants:
-            # No safe complete identity+compatibility bundle fits under 75.
-            #
-            # V4.1 never word-truncates a mandatory phrase because that can
-            # create invalid endings such as "Compatible with". Keep the
-            # shortest complete verified identity representation, then append
-            # compatibility only when the complete phrase fits.
-            safe_identity_options = sorted(
-                {
-                    value
-                    for value in identity_variants
-                    if value
-                },
-                key=len,
-            )
-
-            emergency_identity = (
-                safe_identity_options[0]
-                if safe_identity_options
-                else
-                identity_full
-            )
-
-            emergency_parts = [
-                part
-                for part in [
-                    quantity_text,
-                    emergency_identity,
-                ]
-                if part
-            ]
-
-            emergency_compatibility = (
-                compatibility_first_brand
-                or
-                compatibility_short
-                or
-                compatibility_full
-            )
-
-            if emergency_compatibility:
-                proposal = " ".join(
-                    emergency_parts
-                    +
-                    [
-                        emergency_compatibility
-                    ]
-                )
-
-                if len(proposal) <= 75:
-                    emergency_parts.append(
-                        emergency_compatibility
-                    )
-
-            emergency_title = " ".join(
-                emergency_parts
-            )
-
-            # If quantity + identity itself exceeds the limit, prefer the
-            # complete identity over a broken/truncated phrase.
-            if len(emergency_title) > 75:
-                emergency_parts = [
-                    emergency_identity
-                ]
-                emergency_title = (
-                    emergency_identity
-                )
-
-            blocked_words = (
-                TitleGenerator.check_blocked_words(
-                    emergency_title
-                )
-            )
-
-            emergency_compatibility_present = bool(
-                not compatibility_full
-                or
-                (
-                    emergency_compatibility
-                    and
-                    emergency_compatibility.casefold()
-                    in
-                    emergency_title.casefold()
-                )
-            )
-
-            return {
-                "title":
-                    emergency_title,
-                "selected_models":
-                    [],
-                "removed_models":
-                    [],
-                "character_count":
-                    len(
-                        emergency_title
-                    ),
-                "validation": {
-                    "length_ok":
-                        False,
-                    "min_length_ok":
-                        len(
-                            emergency_title
-                        )
-                        >=
-                        61,
-                    "max_length_ok":
-                        len(
-                            emergency_title
-                        )
-                        <=
-                        75,
-                    "identity_present":
-                        bool(identity_full),
-                    "compatibility_required":
-                        bool(compatibility_full),
-                    "compatibility_present":
-                        emergency_compatibility_present,
-                    "hard_constraints_ok":
-                        False,
-                    "hard_constraint_errors": [
-                        "mandatory_core_exceeds_75_characters"
-                    ]
-                    +
-                    (
-                        ["compatibility_missing"]
-                        if (
-                            compatibility_full
-                            and
-                            not emergency_compatibility_present
-                        )
-                        else
-                        []
-                    ),
-                    "compliance_ok":
-                        len(blocked_words)
-                        ==
-                        0,
-                    "insufficient_verified_facts":
-                        False,
-                },
-                "blocked_words":
-                    blocked_words,
-                "brand_check":
-                    "failed",
-                "generator_version":
-                    "V5.0-source-preservation-final-audit",
-                "budget_parts":
-                    emergency_parts,
-                "accepted_candidates":
-                    [],
-                "rejected_candidates":
-                    [],
-                "budget_used":
-                    len(emergency_title),
-                "budget_remaining":
-                    max(
-                        0,
-                        75
-                        -
-                        len(emergency_title),
-                    ),
-                "solver": {
-                    "status":
-                        "mandatory_core_conflict",
-                    "repair_applied":
-                        True,
-                },
-            }
-
-        # Prefer the most complete core that still leaves room.
-        # Full identity / full compatibility win when possible.
-        core_variants.sort(
-            key=lambda item: (
-                item[
-                    "identity_is_short"
-                ],
-                item[
-                    "compatibility_is_compressed"
-                ],
-                -item[
-                    "length"
-                ],
-            )
-        )
-
-        core = core_variants[0]
-
-        # =================================================
-        # Candidate pool
-        # =================================================
-
-        pool = []
-        seen_pool = set()
-
-
-        def add_pool_item(
-            text_value,
-            candidate_type="OTHER",
-            priority="C",
-            value=30.0,
-            source="verified_profile",
-            short_text="",
-            original_index=None,
-        ):
-            text_value = normalize_text(
-                text_value
-            )
-
-            short_text = normalize_text(
-                short_text
-            )
-
-            if not text_value:
-                return
-
-            key = norm_key(
-                text_value
-            )
-
-            if not key:
-                return
-
-            if key in excluded_keys:
-                return
-
-            if key in seen_pool:
-                return
-
-            mandatory_keys = {
-                norm_key(
-                    core.get(
-                        "identity",
-                        "",
-                    )
-                ),
-                norm_key(
-                    core.get(
-                        "compatibility",
-                        "",
-                    )
-                ),
-                norm_key(
-                    quantity_text
-                ),
-            }
-
-            if key in mandatory_keys:
-                return
-
-            seen_pool.add(
-                key
-            )
-
-            pool.append(
-                {
-                    "text":
-                        text_value,
-                    "short_text":
-                        short_text,
-                    "type":
-                        normalize_text(
-                            candidate_type
-                        ).upper()
-                        or
-                        "OTHER",
-                    "priority":
-                        normalize_text(
-                            priority
-                        ).upper()
-                        or
-                        "C",
-                    "value":
-                        safe_number(
-                            value,
-                            30,
-                        ),
-                    "source":
-                        source,
-                    "original_index":
-                        original_index,
-                }
-            )
-
-
-        # Strategy candidates remain the primary pool.
-        for index, candidate in enumerate(
-            candidates
-        ):
-            if not isinstance(candidate, dict):
-                continue
-
-            candidate_type = normalize_text(
-                candidate.get(
-                    "type",
-                    "OTHER",
-                )
-            ).upper()
-
-            if candidate_type in {
-                "IDENTITY",
-                "COMPATIBILITY",
-                "QUANTITY",
-            }:
-                continue
-
-            add_pool_item(
-                candidate.get(
-                    "text",
-                    "",
-                ),
-                candidate_type=candidate_type,
-                priority=normalize_text(
-                    candidate.get(
-                        "priority",
-                        "C",
-                    )
-                ).upper(),
-                value=candidate_value(
-                    candidate
-                ),
-                source="title_strategy",
-                short_text=candidate.get(
-                    "short_text",
-                    "",
-                ),
-                original_index=index,
-            )
-
-        # Verified fallback sources.
+        # -------------------------------------------------
+        # Quantity
+        # -------------------------------------------------
         candidate_facts = strategy_input.get(
             "candidate_facts",
             {},
@@ -1591,1341 +364,516 @@ class TitleGenerator:
         if not isinstance(candidate_facts, dict):
             candidate_facts = {}
 
-        confirmed_facts = strategy_input.get(
-            "confirmed_facts",
-            {},
-        )
-
-        if not isinstance(confirmed_facts, dict):
-            confirmed_facts = {}
-
-        purpose = strategy_input.get(
-            "purpose",
-            {},
-        )
-
-        if not isinstance(purpose, dict):
-            purpose = {}
-
-
-        def add_many(
-            values,
-            candidate_type,
-            priority,
-            value,
-            source,
-        ):
-            if isinstance(values, list):
-                source_values = values
-            elif values:
-                source_values = [values]
-            else:
-                source_values = []
-
-            for value_item in source_values:
-                add_pool_item(
-                    value_item,
-                    candidate_type,
-                    priority,
-                    value,
-                    source,
-                )
-
-
-        add_many(
-            candidate_facts.get(
-                "locked_all_models",
-                [],
-            ),
-            "MODEL",
-            "A",
-            78,
-            "candidate_facts.locked_all_models",
-        )
-
-        add_many(
-            candidate_facts.get(
-                "locked_secondary_models",
-                [],
-            ),
-            "MODEL",
-            "B",
-            68,
-            "candidate_facts.locked_secondary_models",
-        )
-
-        # =================================================
-        # V5 Source Fact Preservation
-        #
-        # High-confidence alphanumeric identifiers and specifications are
-        # exact source facts. They may safely re-enter the candidate reservoir
-        # even if an earlier AI layer failed to classify them.
-        #
-        # Source context phrases are NOT auto-added here; those still require
-        # Title Strategy semantic evaluation to avoid importing seller brands
-        # or low-value wording.
-        # =================================================
-
-        add_many(
-            candidate_facts.get(
-                "source_identifier_candidates",
-                [],
-            ),
-            "MODEL",
-            "B",
-            72,
-            "candidate_facts.source_identifier_candidates",
-        )
-
-        add_many(
-            confirmed_facts.get(
-                "part_numbers",
-                [],
-            ),
-            "PART_NUMBER",
-            "A",
-            78,
-            "confirmed_facts.part_numbers",
-        )
-
-        add_many(
-            candidate_facts.get(
-                "important_specifications",
-                [],
-            ),
-            "SPECIFICATION",
-            "B",
-            65,
-            "candidate_facts.important_specifications",
-        )
-
-        add_many(
-            candidate_facts.get(
-                "specifications",
-                [],
-            ),
-            "SPECIFICATION",
-            "B",
-            62,
-            "candidate_facts.specifications",
-        )
-
-        add_many(
-            candidate_facts.get(
-                "design_features",
-                [],
-            ),
-            "FEATURE",
-            "B",
-            55,
-            "candidate_facts.design_features",
-        )
-
-        add_many(
-            candidate_facts.get(
-                "functional_features",
-                [],
-            ),
-            "FEATURE",
-            "B",
-            55,
-            "candidate_facts.functional_features",
-        )
-
-        add_many(
-            confirmed_facts.get(
-                "material",
-                [],
-            ),
-            "MATERIAL",
-            "B",
-            50,
-            "confirmed_facts.material",
-        )
-
-        add_many(
-            confirmed_facts.get(
-                "color",
-                [],
-            ),
-            "FEATURE",
-            "C",
-            35,
-            "confirmed_facts.color",
-        )
-
-        for field_name in (
-            "dimensions",
-            "voltage",
-            "power",
-            "weight",
-        ):
-            add_many(
-                confirmed_facts.get(
-                    field_name,
-                    [],
-                ),
-                "SPECIFICATION",
-                "B",
-                58,
-                f"confirmed_facts.{field_name}",
-            )
-
-        add_many(
-            candidate_facts.get(
-                "search_primary_keywords",
-                [],
-            ),
-            "SEARCH_TERM",
-            "B",
-            52,
-            "candidate_facts.search_primary_keywords",
-        )
-
-        add_many(
-            candidate_facts.get(
-                "search_secondary_keywords",
-                [],
-            ),
-            "SEARCH_TERM",
-            "C",
-            42,
-            "candidate_facts.search_secondary_keywords",
-        )
-
-        add_many(
-            candidate_facts.get(
-                "important_context",
-                [],
-            ),
-            "USAGE",
-            "C",
-            40,
-            "candidate_facts.important_context",
-        )
-
-        add_many(
-            candidate_facts.get(
-                "usage_scenarios",
-                [],
-            ),
-            "USAGE",
-            "C",
-            35,
-            "candidate_facts.usage_scenarios",
-        )
-
-        add_many(
-            purpose.get(
-                "primary_function",
-                "",
-            ),
-            "FEATURE",
-            "C",
-            38,
-            "purpose.primary_function",
-        )
-
-        add_many(
-            purpose.get(
-                "primary_use",
-                "",
-            ),
-            "USAGE",
-            "C",
-            35,
-            "purpose.primary_use",
-        )
-
-        title_plan = profile.get(
-            "title_plan",
-            {},
-        )
-
-        if isinstance(title_plan, dict):
-            add_many(
-                title_plan.get(
-                    "search_terms",
-                    [],
-                ),
-                "SEARCH_TERM",
-                "C",
-                38,
-                "title_plan.search_terms",
-            )
-
-            add_many(
-                title_plan.get(
-                    "features",
-                    [],
-                ),
-                "FEATURE",
-                "C",
-                38,
-                "title_plan.features",
-            )
-
-        # =================================================
-        # Core-specific mandatory primary model
-        #
-        # Model is high priority but never allowed to displace
-        # identity or compatibility.
-        # =================================================
-
-        primary_model = normalize_text(
-            locked_models.get(
-                "primary",
-                "",
-            )
-        )
-
-        if (
-            primary_model
-            and
-            norm_key(primary_model)
-            not in {
-                norm_key(identity_full),
-                norm_key(core["identity"]),
-            }
-        ):
-            add_pool_item(
-                primary_model,
-                "MODEL",
-                "A",
-                90,
-                "locked.models.primary",
-            )
-
-        # =================================================
-        # Redundancy / fact-value guards
-        # =================================================
-
-        def information_gain(
-            text_value,
-            existing_parts,
-        ):
-            new_words = set(
-                words(
-                    text_value
-                )
-            )
-
-            if not new_words:
-                return 0.0
-
-            existing_words = set()
-
-            for part in existing_parts:
-                existing_words.update(
-                    words(
-                        part
-                    )
-                )
-
-            novel = (
-                new_words
-                -
-                existing_words
-            )
-
-            return (
-                len(novel)
-                /
-                max(
-                    1,
-                    len(new_words),
-                )
-            )
-
-
-        def compact_novel_fragment(
-            text_value,
-            current_parts,
-        ):
-            """
-            When a phrase repeats a large part of the existing title but adds
-            a small verified fact, keep only the genuinely new fragment.
-
-            Example:
-            "Pickup Pole Spacing 52mm" after "Guitar Humbucker Pickup"
-            -> "Pole Spacing 52mm"
-
-            This is deterministic extraction from the verified candidate text,
-            not generation of new facts.
-            """
-
-            candidate_signature = semantic_signature(
-                text_value
-            )
-
-            existing_signature = set()
-
-            for current_part in current_parts:
-                existing_signature.update(
-                    semantic_signature(
-                        current_part
-                    )
-                )
-
-            if (
-                not candidate_signature
-                or
-                not existing_signature
-            ):
-                return ""
-
-            overlap = (
-                candidate_signature
-                &
-                existing_signature
-            )
-
-            novel = (
-                candidate_signature
-                -
-                existing_signature
-            )
-
-            if not novel:
-                return ""
-
-            overlap_ratio = (
-                len(overlap)
-                /
-                max(
-                    1,
-                    len(candidate_signature),
-                )
-            )
-
-            if overlap_ratio < 0.25:
-                return ""
-
-            generic_novel = {
-                "part",
-                "parts",
-                "accessory",
-                "accessories",
-                "replacement",
-                "spare",
-                "system",
-                "mechanism",
-                "control",
-                "button",
-                "construction",
-                "component",
-                "device",
-                "equipment",
-                "machine",
-                "model",
-                "number",
-            }
-
-            if novel.issubset(
-                generic_novel
-            ):
-                return ""
-
-            original_tokens = re.findall(
-                r"[A-Za-z0-9]+(?:[-/×x][A-Za-z0-9]+)*",
-                normalize_text(
-                    text_value
-                ),
-            )
-
-            fragment_tokens = []
-
-            for token in original_tokens:
-                token_signature = semantic_signature(
-                    token
-                )
-
-                if (
-                    token_signature
-                    and
-                    token_signature
-                    &
-                    novel
-                ):
-                    fragment_tokens.append(
-                        token
-                    )
-
-            fragment = normalize_text(
-                " ".join(
-                    fragment_tokens
-                )
-            )
-
-            if not fragment:
-                return ""
-
-            # A single generic word is not useful as a title fragment.
-            fragment_signature = semantic_signature(
-                fragment
-            )
-
-            if (
-                len(fragment_signature) == 1
-                and
-                fragment_signature.issubset(
-                    generic_novel
-                )
-            ):
-                return ""
-
-            return fragment
-
-
-        def choose_variant(
-            item,
-            current_parts,
-        ):
-            full_text = normalize_text(
-                item.get(
-                    "text",
+        quantity = (
+            TitleGenerator
+            ._compact_quantity(
+                candidate_facts.get(
+                    "important_quantity",
                     "",
                 )
             )
+        )
 
-            short_text = normalize_text(
-                item.get(
-                    "short_text",
-                    "",
-                )
+        if not quantity:
+            source_evidence = strategy_input.get(
+                "source_evidence",
+                {},
             )
 
-            variants = []
-
-            for variant, source_name in (
-                (
-                    full_text,
-                    "text",
-                ),
-                (
-                    short_text,
-                    "short_text",
-                ),
-            ):
-                if not variant:
-                    continue
-
-                if (
-                    variant,
-                    source_name,
-                ) in variants:
-                    continue
-
-                # If the whole phrase is already expressed, never select it.
-                if is_semantically_redundant(
-                    variant,
-                    current_parts,
-                ):
-                    continue
-
-                compact_fragment = (
-                    compact_novel_fragment(
-                        variant,
-                        current_parts,
+            if isinstance(source_evidence, dict):
+                source_quantities = (
+                    source_evidence.get(
+                        "quantities",
+                        [],
                     )
+                    if isinstance(
+                        source_evidence.get(
+                            "quantities",
+                            [],
+                        ),
+                        list,
+                    )
+                    else
+                    []
                 )
 
-                variant_signature = semantic_signature(
-                    variant
-                )
-                existing_signature = set()
-
-                for current_part in current_parts:
-                    existing_signature.update(
-                        semantic_signature(
-                            current_part
+                if source_quantities:
+                    quantity = (
+                        TitleGenerator
+                        ._compact_quantity(
+                            source_quantities[0]
                         )
                     )
 
-                overlap_ratio = (
-                    len(
-                        variant_signature
-                        &
-                        existing_signature
-                    )
-                    /
-                    max(
-                        1,
-                        len(
-                            variant_signature
-                        ),
-                    )
-                )
-
-                if (
-                    compact_fragment
-                    and
-                    compact_fragment
-                    !=
-                    variant
-                ):
-                    variants.append(
-                        (
-                            compact_fragment,
-                            source_name
-                            +
-                            "_semantic_compact",
-                        )
-                    )
-
-                # When at least 25% of a descriptive phrase merely repeats
-                # existing title meaning, prefer the compact novel fragment.
-                # If no useful novel fragment exists, drop the phrase instead
-                # of keeping duplicated wording. Identifier candidates remain
-                # exempt because their exact surface form may be selection-
-                # critical.
-                if (
-                    overlap_ratio >= 0.25
-                    and
-                    item.get(
-                        "type",
-                        ""
-                    )
-                    not in {
-                        "MODEL",
-                        "PART_NUMBER",
-                    }
-                ):
-                    if compact_fragment:
-                        continue
-
-                    # no useful new fragment -> reject the verbose phrase
-                    continue
-
-                variants.append(
-                    (
-                        variant,
-                        source_name,
-                    )
-                )
-
-            for variant, source_name in variants:
-                candidate_title = " ".join(
-                    current_parts
-                    +
-                    [variant]
-                )
-
-                if len(candidate_title) <= 75:
-                    return (
-                        variant,
-                        source_name,
-                    )
-
-            return (
-                "",
-                "",
-            )
-
-        # =================================================
-        # Deterministic global allocation
-        # =================================================
-
-        pool.sort(
-            key=candidate_sort_key
-        )
-
-        selected_items = []
-        rejected_items = []
-
-        title_parts = list(
-            core[
-                "parts"
-            ]
-        )
-
-        selected_models = []
-        removed_models = []
-
-        accepted_candidates = []
-
-        # Record mandatory core.
-        for part in title_parts:
-            if part == quantity_text:
-                item_type = "QUANTITY"
-            elif part == core["identity"]:
-                item_type = "IDENTITY"
-            elif (
-                core.get(
-                    "compatibility",
-                    ""
-                )
-                and
-                part == core["compatibility"]
-            ):
-                item_type = "COMPATIBILITY"
-            else:
-                item_type = "OTHER"
-
-            accepted_candidates.append(
-                {
-                    "index":
-                        None,
-                    "text":
-                        part,
-                    "short_text":
-                        "",
-                    "selected_text":
-                        part,
-                    "selected_source":
-                        "mandatory_core",
-                    "type":
-                        item_type,
-                    "priority":
-                        (
-                            "S"
-                            if item_type
-                            in {
-                                "QUANTITY",
-                                "IDENTITY",
-                            }
-                            else
-                            "A"
-                        ),
-                    "required":
-                        True,
-                    "reason":
-                        "mandatory_core",
-                    "character_count_after":
-                        len(
-                            " ".join(
-                                title_parts[
-                                    :
-                                    title_parts.index(part)
-                                    +
-                                    1
-                                ]
-                            )
-                        ),
-                }
-            )
-
-        # Pass 1:
-        # use non-trivial incremental value candidates.
-        deferred = []
-
-        for item in pool:
-
-            # V4.1 semantic union de-duplication.
-            #
-            # Do not allow a candidate to repackage facts already present
-            # across multiple title parts merely to consume characters.
-            # Exact identifiers are the only exception because a model/part
-            # number may legitimately overlap surrounding descriptive text.
-            if (
-                item["type"]
-                not in {
-                    "MODEL",
-                    "PART_NUMBER",
-                }
-                and
-                is_semantically_redundant(
-                    item[
-                        "text"
-                    ],
-                    title_parts,
-                )
-            ):
-                rejected_items.append(
-                    {
-                        **item,
-                        "reason":
-                            "semantic_redundancy",
-                    }
-                )
-                continue
-
-            gain = information_gain(
-                item[
-                    "text"
-                ],
-                title_parts,
-            )
-
-            # Candidates with zero incremental meaning are not used in pass 1.
-            if (
-                gain <= 0
-                and
-                item["type"]
-                not in {
-                    "MODEL",
-                    "PART_NUMBER",
-                }
-            ):
-                deferred.append(
-                    item
-                )
-                continue
-
-            selected_text, selected_source = (
-                choose_variant(
-                    item,
-                    title_parts,
-                )
-            )
-
-            if not selected_text:
-                rejected_items.append(
-                    {
-                        **item,
-                        "reason":
-                            "character_budget",
-                    }
-                )
-
-                if item["type"] in {
-                    "MODEL",
-                    "PART_NUMBER",
-                }:
-                    removed_models.append(
-                        item["text"]
-                    )
-
-                continue
-
-            title_parts.append(
-                selected_text
-            )
-
-            selected_items.append(
-                {
-                    **item,
-                    "selected_text":
-                        selected_text,
-                    "selected_source":
-                        selected_source,
-                }
-            )
-
-            if item["type"] in {
-                "MODEL",
-                "PART_NUMBER",
-            }:
-                selected_models.append(
-                    selected_text
-                )
-
-            accepted_candidates.append(
-                {
-                    "index":
-                        item.get(
-                            "original_index"
-                        ),
-                    "text":
-                        item[
-                            "text"
-                        ],
-                    "short_text":
-                        item.get(
-                            "short_text",
-                            "",
-                        ),
-                    "selected_text":
-                        selected_text,
-                    "selected_source":
-                        selected_source,
-                    "type":
-                        item[
-                            "type"
-                        ],
-                    "priority":
-                        item[
-                            "priority"
-                        ],
-                    "required":
-                        False,
-                    "reason":
-                        "solver_selected",
-                    "source":
-                        item[
-                            "source"
-                        ],
-                    "character_count_after":
-                        len(
-                            " ".join(
-                                title_parts
-                            )
-                        ),
-                }
-            )
-
-        # Pass 2:
-        # If still below 61, verified SEO/search phrases may be used even
-        # when partially redundant. This is allowed only because they come
-        # from the verified candidate pool and no new fact is invented.
-        if len(
-            " ".join(
-                title_parts
-            )
-        ) < 61:
-
-            deferred.sort(
-                key=candidate_sort_key
-            )
-
-            for item in deferred:
-
-                if item["type"] not in {
-                    "SEARCH_TERM",
-                    "FEATURE",
-                    "MATERIAL",
-                    "USAGE",
-                    "SPECIFICATION",
-                }:
-                    continue
-
-                selected_text, selected_source = (
-                    choose_variant(
-                        item,
-                        title_parts,
-                    )
-                )
-
-                if not selected_text:
-                    continue
-
-                # V4.1: minimum-length completion must still add genuinely
-                # new meaning. Never repeat existing material/specification/
-                # identity words just to reach 61 characters.
-                if (
-                    norm_key(
-                        selected_text
-                    )
-                    in {
-                        norm_key(part)
-                        for part in title_parts
-                    }
-                    or
-                    is_semantically_redundant(
-                        selected_text,
-                        title_parts,
-                    )
-                ):
-                    rejected_items.append(
-                        {
-                            **item,
-                            "reason":
-                                "semantic_redundancy_minimum_length",
-                        }
-                    )
-                    continue
-
-                title_parts.append(
-                    selected_text
-                )
-
-                selected_items.append(
-                    {
-                        **item,
-                        "selected_text":
-                            selected_text,
-                        "selected_source":
-                            selected_source,
-                    }
-                )
-
-                accepted_candidates.append(
-                    {
-                        "index":
-                            item.get(
-                                "original_index"
-                            ),
-                        "text":
-                            item[
-                                "text"
-                            ],
-                        "short_text":
-                            item.get(
-                                "short_text",
-                                "",
-                            ),
-                        "selected_text":
-                            selected_text,
-                        "selected_source":
-                            selected_source,
-                        "type":
-                            item[
-                                "type"
-                            ],
-                        "priority":
-                            item[
-                                "priority"
-                            ],
-                        "required":
-                            False,
-                        "reason":
-                            "minimum_length_verified_completion",
-                        "source":
-                            item[
-                                "source"
-                            ],
-                        "character_count_after":
-                            len(
-                                " ".join(
-                                    title_parts
-                                )
-                            ),
-                    }
-                )
-
-                if len(
-                    " ".join(
-                        title_parts
-                    )
-                ) >= 61:
-                    break
-
-        title = " ".join(
-            title_parts
-        )
-
-        title = (
-            TitleGenerator.clean_title(
-                title
+        quantity_present = (
+            True
+            if not quantity
+            else
+            title_fold.startswith(
+                quantity.casefold()
             )
         )
 
-        if len(title) > 75:
-            title = (
-                TitleGenerator.limit_length(
-                    title,
-                    75,
-                )
+        if not quantity_present:
+            errors.append(
+                "multi_unit_quantity_missing_or_not_prefixed"
             )
 
-        # =================================================
-        # Hard validation against LOCKED facts, not merely
-        # whichever candidates happened to survive.
-        # =================================================
-
-        title_fold = title.casefold()
-
-        identity_variants_for_validation = [
-            value
-            for value in [
-                identity_full,
-                identity_short,
-                core.get(
-                    "identity",
-                    "",
-                ),
-            ]
-            if value
-        ]
-
-        identity_present = any(
-            value.casefold()
-            in title_fold
-            for value in identity_variants_for_validation
+        # -------------------------------------------------
+        # Compatibility
+        # -------------------------------------------------
+        compatibility_facts = strategy_input.get(
+            "compatibility_facts",
+            {},
         )
+
+        if not isinstance(
+            compatibility_facts,
+            dict,
+        ):
+            compatibility_facts = {}
+
+        brands = TitleGenerator._list(
+            compatibility_facts.get(
+                "brands",
+                [],
+            )
+        )
+
+        if not brands:
+            brands = TitleGenerator._list(
+                compatibility_facts.get(
+                    "third_party_brands",
+                    [],
+                )
+            )
 
         compatibility_required = bool(
-            compatibility_full
-            or
-            compatibility_brands
+            brands
         )
 
-        compatibility_validation_variants = [
-            value
-            for value in [
-                compatibility_full,
-                compatibility_short,
-                compatibility_first_brand,
-                core.get(
-                    "compatibility",
-                    "",
-                ),
-            ]
-            if value
-        ]
-
-        compatibility_present = (
+        compatibility_brand_present = (
             True
-            if not compatibility_required
+            if not brands
             else
             any(
-                value.casefold()
-                in title_fold
-                for value
-                in compatibility_validation_variants
+                brand.casefold()
+                in
+                title_fold
+                for brand in brands
             )
         )
 
-        # V5 final brand/qualifier audit.
-        #
-        # A third-party brand appearing naked is NOT enough.
-        # We distinguish:
-        # - brand missing
-        # - compatibility qualifier missing
-        # - full compatibility phrase present
-        compatibility_brand_present = (
-            True
-            if not compatibility_required
-            else
-            any(
-                normalize_text(
-                    brand
-                ).casefold()
-                in
-                title_fold
-                for brand
-                in compatibility_brands
-                if normalize_text(
-                    brand
+        qualifiers = (
+            TitleGenerator
+            ._compatibility_qualifiers(
+                strategy_input.get(
+                    "target_language",
+                    "English",
                 )
             )
         )
 
         compatibility_qualifier_present = (
             True
-            if not compatibility_required
+            if not brands
             else
-            compatibility_present
-        )
-
-        compatibility_repair_required = bool(
-            compatibility_required
-            and
-            (
-                not compatibility_brand_present
-                or
-                not compatibility_qualifier_present
+            any(
+                qualifier.casefold()
+                in
+                title_fold
+                for qualifier in qualifiers
             )
         )
 
-        min_length_ok = len(title) >= 61
-        max_length_ok = len(title) <= 75
+        if (
+            brands
+            and
+            not compatibility_brand_present
+        ):
+            errors.append(
+                "compatibility_brand_missing"
+            )
 
-        # =================================================
-        # Distinguish true source insufficiency from pipeline fact loss.
-        #
-        # We may only declare "insufficient_verified_facts" when:
-        # - title is below 61
-        # - no actionable high-value source fact remains unresolved
-        #
-        # Otherwise the correct status is PIPELINE_FACT_LOSS.
-        # =================================================
+        if (
+            brands
+            and
+            not compatibility_qualifier_present
+        ):
+            errors.append(
+                "compatibility_qualifier_missing"
+            )
 
-        source_evidence_block = strategy_input.get(
+        # -------------------------------------------------
+        # Primary model protection
+        # -------------------------------------------------
+        locked = strategy_input.get(
+            "locked",
+            {},
+        )
+
+        if not isinstance(locked, dict):
+            locked = {}
+
+        models_block = locked.get(
+            "models",
+            {},
+        )
+
+        if not isinstance(models_block, dict):
+            models_block = {}
+
+        primary_model = TitleGenerator._clean(
+            models_block.get(
+                "primary",
+                "",
+            )
+        )
+
+        primary_model_present = (
+            True
+            if not primary_model
+            else
+            primary_model.casefold()
+            in
+            title_fold
+        )
+
+        if not primary_model_present:
+            errors.append(
+                "primary_model_missing"
+            )
+
+        all_models = (
+            TitleGenerator
+            ._all_verified_models(
+                profile,
+                strategy_input,
+            )
+        )
+
+        compatibility_models = TitleGenerator._list(
+            compatibility_facts.get(
+                "models",
+                [],
+            )
+        )
+
+        compatibility_models += [
+            value
+            for value in TitleGenerator._list(
+                compatibility_facts.get(
+                    "important_compatibility",
+                    [],
+                )
+            )
+            if value not in compatibility_models
+        ]
+
+        model_only_compatibility_present = (
+            True
+            if (
+                brands
+                or
+                not compatibility_models
+            )
+            else
+            any(
+                model.casefold()
+                in
+                title_fold
+                for model
+                in compatibility_models
+            )
+        )
+
+        if not model_only_compatibility_present:
+            errors.append(
+                "compatibility_models_missing"
+            )
+
+        # If <61 while verified models remain unused, the title is a
+        # composition failure, NOT an insufficiency.
+        unused_models = [
+            model
+            for model in all_models
+            if model.casefold()
+            not in
+            title_fold
+        ]
+
+        if (
+            not min_length_ok
+            and
+            unused_models
+        ):
+            errors.append(
+                "unused_models_before_min_length"
+            )
+
+        # -------------------------------------------------
+        # Range-compression fact protection
+        # -------------------------------------------------
+        source_evidence = strategy_input.get(
             "source_evidence",
             {},
         )
 
-        if not isinstance(
-            source_evidence_block,
-            dict,
-        ):
-            source_evidence_block = {}
+        if not isinstance(source_evidence, dict):
+            source_evidence = {}
 
-        unresolved_source_facts = source_evidence_block.get(
-            "unresolved_high_value",
-            [],
+        raw_title = TitleGenerator._clean(
+            source_evidence.get(
+                "raw_title",
+                "",
+            )
         )
 
-        if not isinstance(
-            unresolved_source_facts,
-            list,
+        numeric_models = {
+            model
+            for model in all_models
+            if re.fullmatch(
+                r"\d{2,}",
+                model,
+            )
+        }
+
+        range_compression_detected = False
+
+        for match in re.finditer(
+            r"\b(\d{2,})\s*[-–—]\s*(\d{2,})\b",
+            title,
         ):
-            unresolved_source_facts = []
+            left = match.group(1)
+            right = match.group(2)
 
-        strategy_excluded_texts = [
-            normalize_text(
-                value
-            )
-            for value
-            in title_strategy.get(
-                "exclude",
-                [],
-            )
-            if normalize_text(
-                value
-            )
-        ]
-
-        def source_fact_explicitly_excluded(
-            fact_text,
-        ):
-            fact_fold = normalize_text(
-                fact_text
-            ).casefold()
-
-            if not fact_fold:
-                return True
-
-            for excluded_text in strategy_excluded_texts:
-                excluded_fold = excluded_text.casefold()
-
-                if (
-                    fact_fold
-                    in
-                    excluded_fold
-                    or
-                    excluded_fold
-                    in
-                    fact_fold
-                ):
-                    return True
-
-            return False
-
-        def source_fact_already_represented(
-            fact_text,
-        ):
-            fact_text = normalize_text(
-                fact_text
-            )
-
-            if not fact_text:
-                return True
-
-            fact_fold = fact_text.casefold()
-
-            # Exact source fact is already present.
-            if fact_fold in title_fold:
-                return True
-
-            # Multi-word source evidence may be represented through a
-            # normalized wording. Consider it represented only when most
-            # meaningful words survive; this prevents false PIPELINE_FACT_LOSS
-            # for harmless grammar normalization while still catching missing
-            # context such as "Conveyor Track" / "Edgebanding Machine".
-            fact_words = [
-                word.casefold()
-                for word in re.findall(
-                    r"[A-Za-z0-9]+(?:[-/+.][A-Za-z0-9]+)*",
-                    fact_text,
-                )
-                if (
-                    len(word) >= 3
-                    and
-                    word.casefold()
-                    not in {
-                        "for",
-                        "with",
-                        "and",
-                        "the",
-                        "parts",
-                        "part",
-                        "spare",
-                        "accessories",
-                        "accessory",
-                    }
-                )
-            ]
-
-            if not fact_words:
-                return True
-
-            represented_count = sum(
-                1
-                for word in fact_words
-                if word in title_fold
-            )
-
-            return (
-                represented_count
-                /
-                len(fact_words)
-            ) >= 0.70
-
-
-        actionable_unresolved_source_facts = [
-            normalize_text(
-                fact
-            )
-            for fact
-            in unresolved_source_facts
             if (
-                normalize_text(
-                    fact
-                )
+                left in numeric_models
                 and
-                not source_fact_explicitly_excluded(
-                    fact
-                )
+                right in numeric_models
                 and
-                not source_fact_already_represented(
-                    fact
+                match.group(0).casefold()
+                not in
+                raw_title.casefold()
+            ):
+                range_compression_detected = True
+                errors.append(
+                    "forbidden_model_range_compression"
                 )
+                break
+
+        # -------------------------------------------------
+        # Seller brand
+        # -------------------------------------------------
+        seller_brand = TitleGenerator._clean(
+            compatibility_facts.get(
+                "seller_brand",
+                "",
             )
-        ]
-
-        pipeline_fact_loss = bool(
-            not min_length_ok
-            and
-            actionable_unresolved_source_facts
         )
 
-        insufficient_verified_facts = bool(
-            not min_length_ok
+        seller_brand_leaked = bool(
+            seller_brand
             and
-            not pipeline_fact_loss
+            seller_brand.casefold()
+            in
+            title_fold
         )
 
+        if seller_brand_leaked:
+            errors.append(
+                "seller_brand_leaked"
+            )
+
+        # -------------------------------------------------
+        # Noise / blocked terms
+        # -------------------------------------------------
         blocked_words = (
-            TitleGenerator.check_blocked_words(
+            TitleGenerator
+            .check_blocked_words(
                 title
             )
         )
 
-        hard_constraint_errors = []
+        if blocked_words:
+            errors.append(
+                "blocked_marketing_word"
+            )
 
-        if not min_length_ok:
-            if pipeline_fact_loss:
-                hard_constraint_errors.append(
-                    "pipeline_fact_loss"
+        noise_patterns = [
+            r"\b\d+\.(?:please|the|technical)\b",
+            r"\bmainland china\b",
+            r"\bmeasurement error\b",
+            r"\bslightly different from the pictures\b",
+        ]
+
+        source_noise_detected = any(
+            re.search(
+                pattern,
+                title,
+                flags=re.IGNORECASE,
+            )
+            for pattern in noise_patterns
+        )
+
+        if source_noise_detected:
+            errors.append(
+                "source_noise_in_title"
+            )
+
+        # -------------------------------------------------
+        # Deduplicate errors
+        # -------------------------------------------------
+        clean_errors = []
+
+        for error in errors:
+            if error not in clean_errors:
+                clean_errors.append(
+                    error
                 )
-            elif insufficient_verified_facts:
-                hard_constraint_errors.append(
-                    "insufficient_verified_facts"
+
+        accepted_candidates = []
+        rejected_candidates = []
+        selected_models = []
+
+        for index, candidate in enumerate(
+            strategy.get(
+                "title_candidates",
+                [],
+            )
+        ):
+            if not isinstance(candidate, dict):
+                continue
+
+            full_text = TitleGenerator._clean(
+                candidate.get(
+                    "text",
+                    "",
                 )
+            )
+
+            short_text = TitleGenerator._clean(
+                candidate.get(
+                    "short_text",
+                    "",
+                )
+            )
+
+            present_text = ""
+
+            if (
+                full_text
+                and
+                full_text.casefold()
+                in
+                title_fold
+            ):
+                present_text = full_text
+
+            elif (
+                short_text
+                and
+                short_text.casefold()
+                in
+                title_fold
+            ):
+                present_text = short_text
+
+            record = {
+                "index":
+                    index,
+                "text":
+                    full_text,
+                "short_text":
+                    short_text,
+                "type":
+                    TitleGenerator._clean(
+                        candidate.get(
+                            "type",
+                            "",
+                        )
+                    ).upper(),
+                "priority":
+                    TitleGenerator._clean(
+                        candidate.get(
+                            "priority",
+                            "",
+                        )
+                    ).upper(),
+            }
+
+            if present_text:
+                record[
+                    "selected_text"
+                ] = present_text
+
+                record[
+                    "selected_source"
+                ] = (
+                    "text"
+                    if present_text == full_text
+                    else
+                    "short_text"
+                )
+
+                accepted_candidates.append(
+                    record
+                )
+
+                if record["type"] in {
+                    "MODEL",
+                    "PART_NUMBER",
+                    "COMPATIBILITY_MODEL",
+                }:
+                    selected_models.append(
+                        present_text
+                    )
+
             else:
-                hard_constraint_errors.append(
-                    "title_below_61_characters"
+                record[
+                    "reason"
+                ] = "not_selected_by_ai_composer"
+
+                rejected_candidates.append(
+                    record
                 )
 
-        if not max_length_ok:
-            hard_constraint_errors.append(
-                "title_above_75_characters"
+        removed_models = [
+            model
+            for model in all_models
+            if model.casefold()
+            not in
+            title_fold
+        ]
+
+        composition_status = TitleGenerator._clean(
+            strategy.get(
+                "composition_status",
+                "",
             )
+        ).upper()
 
-        if not identity_present:
-            hard_constraint_errors.append(
-                "identity_missing"
+        final_status = (
+            "resolved"
+            if not clean_errors
+            else
+            (
+                "insufficient_verified_facts"
+                if (
+                    clean_errors
+                    ==
+                    [
+                        "title_below_61_characters"
+                    ]
+                    and
+                    composition_status
+                    ==
+                    "INSUFFICIENT_VERIFIED_FACTS"
+                )
+                else
+                "constraint_unresolved"
             )
-
-        if compatibility_required:
-
-            if not compatibility_brand_present:
-                hard_constraint_errors.append(
-                    "compatibility_brand_missing"
-                )
-
-            elif not compatibility_qualifier_present:
-                hard_constraint_errors.append(
-                    "compatibility_qualifier_missing"
-                )
-
-        # Record non-selected model/part candidates.
-        for item in pool:
-            if item["type"] not in {
-                "MODEL",
-                "PART_NUMBER",
-            }:
-                continue
-
-            if item["text"] in selected_models:
-                continue
-
-            if item["text"] not in removed_models:
-                removed_models.append(
-                    item["text"]
-                )
+        )
 
         return {
             "title":
@@ -2947,56 +895,56 @@ class TitleGenerator:
                         and
                         max_length_ok
                     ),
-
                 "min_length_ok":
                     min_length_ok,
-
                 "max_length_ok":
                     max_length_ok,
-
                 "identity_present":
                     identity_present,
-
+                "quantity_required":
+                    bool(quantity),
+                "quantity_present":
+                    quantity_present,
                 "compatibility_required":
                     compatibility_required,
-
-                "compatibility_present":
-                    compatibility_present,
-
                 "compatibility_brand_present":
                     compatibility_brand_present,
-
                 "compatibility_qualifier_present":
                     compatibility_qualifier_present,
-
-                "compatibility_repair_required":
-                    compatibility_repair_required,
-
-                "pipeline_fact_loss":
-                    pipeline_fact_loss,
-
-                "actionable_unresolved_source_facts":
-                    actionable_unresolved_source_facts,
-
+                "compatibility_models_present":
+                    model_only_compatibility_present,
+                "primary_model":
+                    primary_model,
+                "primary_model_present":
+                    primary_model_present,
+                "range_compression_detected":
+                    range_compression_detected,
+                "seller_brand_leaked":
+                    seller_brand_leaked,
+                "source_noise_detected":
+                    source_noise_detected,
                 "hard_constraints_ok":
                     len(
-                        hard_constraint_errors
+                        clean_errors
                     )
                     ==
                     0,
-
                 "hard_constraint_errors":
-                    hard_constraint_errors,
-
+                    clean_errors,
                 "compliance_ok":
-                    len(
-                        blocked_words
-                    )
-                    ==
-                    0,
-
+                    (
+                        not blocked_words
+                        and
+                        not seller_brand_leaked
+                        and
+                        not source_noise_detected
+                    ),
                 "insufficient_verified_facts":
-                    insufficient_verified_facts,
+                    final_status
+                    ==
+                    "insufficient_verified_facts",
+                "unused_verified_models":
+                    unused_models,
             },
 
             "blocked_words":
@@ -3005,22 +953,28 @@ class TitleGenerator:
             "brand_check":
                 (
                     "passed"
-                    if compatibility_present
+                    if (
+                        compatibility_brand_present
+                        and
+                        compatibility_qualifier_present
+                    )
                     else
                     "failed"
                 ),
 
             "generator_version":
-                "V5.0-source-preservation-final-audit",
+                TitleGenerator.VERSION,
 
             "budget_parts":
-                title_parts,
+                [
+                    title
+                ],
 
             "accepted_candidates":
                 accepted_candidates,
 
             "rejected_candidates":
-                rejected_items,
+                rejected_candidates,
 
             "budget_used":
                 len(title),
@@ -3033,446 +987,57 @@ class TitleGenerator:
 
             "solver": {
                 "status":
-                    (
-                        "resolved"
-                        if len(
-                            hard_constraint_errors
+                    final_status,
+                "composition_status":
+                    composition_status,
+                "compatibility_mode":
+                    TitleGenerator._clean(
+                        strategy.get(
+                            "compatibility_mode",
+                            "NONE",
                         )
-                        ==
-                        0
-                        else
-                        (
-                            "pipeline_fact_loss"
-                            if pipeline_fact_loss
-                            else
-                            (
-                                "insufficient_verified_facts"
-                                if insufficient_verified_facts
-                                else
-                                "constraint_unresolved"
-                            )
-                        )
-                    ),
-
-                "mandatory_identity":
-                    core.get(
-                        "identity",
-                        "",
-                    ),
-
-                "mandatory_compatibility":
-                    core.get(
-                        "compatibility",
-                        "",
-                    ),
-
-                "identity_compressed":
-                    core.get(
-                        "identity_is_short",
-                        False,
-                    ),
-
-                "compatibility_compressed":
-                    core.get(
-                        "compatibility_is_compressed",
-                        False,
-                    ),
-
-                "candidate_pool_size":
-                    len(pool),
-
-                "selected_optional_count":
-                    len(
-                        selected_items
-                    ),
+                    ).upper(),
+                "used_facts":
+                    strategy.get(
+                        "used_facts",
+                        [],
+                    )
+                    if isinstance(
+                        strategy.get(
+                            "used_facts",
+                            [],
+                        ),
+                        list,
+                    )
+                    else
+                    [],
+                "unused_high_value_facts":
+                    strategy.get(
+                        "unused_high_value_facts",
+                        [],
+                    )
+                    if isinstance(
+                        strategy.get(
+                            "unused_high_value_facts",
+                            [],
+                        ),
+                        list,
+                    )
+                    else
+                    [],
+                "strategy_validation":
+                    strategy.get(
+                        "final_title_validation",
+                        {},
+                    )
+                    if isinstance(
+                        strategy.get(
+                            "final_title_validation",
+                            {},
+                        ),
+                        dict,
+                    )
+                    else
+                    {},
             },
         }
-
-    # =====================================================
-    # 语义重复检测
-    # 防止 Button / Cover / Shaver 等核心词重复
-    # =====================================================
-
-    @staticmethod
-    def has_semantic_overlap(
-        new_text,
-        existing_parts,
-    ):
-
-        if not new_text:
-            return False
-
-
-        if not existing_parts:
-            return False
-
-
-
-        def extract_words(text):
-
-            words = re.findall(
-                r"[a-zA-Z0-9]+",
-                str(text).lower()
-            )
-
-
-            ignore_words = {
-
-                "compatible",
-                "with",
-                "for",
-                "and",
-                "the",
-
-            }
-
-
-            result = set()
-
-
-            for word in words:
-
-                # 太短词忽略
-                if len(word) <= 2:
-                    continue
-
-
-                if word in ignore_words:
-                    continue
-
-
-                result.add(word)
-
-
-            return result
-
-
-
-        new_words = extract_words(
-            new_text
-        )
-
-
-        if not new_words:
-
-            return False
-
-
-
-        for old in existing_parts:
-
-
-            old_words = extract_words(
-                old
-            )
-
-
-            overlap = (
-                new_words
-                &
-                old_words
-            )
-
-
-            # 一个核心词重复即可认为可能重复
-            if overlap:
-
-                return True
-
-
-
-        return False
-    @staticmethod
-    def clean_title(
-        text: str,
-    ):
-
-        for word in TitleGenerator.BLOCKED_WORDS:
-
-            text = re.sub(
-
-                r"\b"
-                +
-                re.escape(word)
-                +
-                r"\b",
-
-                "",
-
-                text,
-
-                flags=re.I,
-
-            )
-
-
-        text = re.sub(
-
-            r"\s+",
-
-            " ",
-
-            text,
-
-        )
-
-
-        return text.strip()
-
-
-
-    @staticmethod
-    def format_title_case(
-        text: str,
-    ):
-
-        words = text.split()
-
-
-        small_words = [
-
-            "with",
-            "and",
-            "for",
-            "de",
-            "para",
-            "con",
-
-        ]
-
-
-        result = []
-
-
-        for index, word in enumerate(words):
-
-            if (
-                index > 0
-                and
-                word.lower()
-                in small_words
-            ):
-
-                result.append(
-                    word.lower()
-                )
-
-            else:
-
-                result.append(
-                    word.capitalize()
-                )
-
-
-        return " ".join(result)
-
-    @staticmethod
-    def compress_title_parts(
-        parts,
-        max_length=75,
-        priority_parts=None,
-    ):
-
-        if len(
-            " ".join(parts)
-        ) <= max_length:
-
-            return parts
-
-
-
-        result = []
-
-
-        # 第一优先级：
-        # 产品身份
-
-        for part in parts:
-
-            if len(result) == 0:
-
-                result.append(
-                    part
-                )
-
-
-
-        # 第二优先级：
-        # 型号
-
-        for part in parts:
-
-            text = str(
-                part
-            )
-
-
-            if re.search(
-                r"[A-Za-z]+\d+",
-                text
-            ):
-
-                if text not in result:
-
-                    result.append(
-                        text
-                    )
-        # 第三优先级：
-        # 标题高价值属性
-
-        if priority_parts:
-
-            for part in priority_parts:
-
-                if part in parts:
-
-                    if part not in result:
-
-                        result.append(
-                            part
-                        )
-
-
-        # 第四优先级：
-        # Compatible with 品牌
-
-        for part in parts:
-
-            if "Compatible with" in str(part):
-
-                if part not in result:
-
-                    result.append(
-                        part
-                    )
-
-
-
-        # 第五优先级：
-        # 其他卖点
-
-        for part in parts:
-
-            if part not in result:
-
-                if len(
-                    " ".join(result+[part])
-                ) <= max_length:
-
-                    result.append(
-                        part
-                    )
-
-
-
-        return result
-    @staticmethod
-    def protect_compatibility_phrases(
-        parts
-    ):
-
-        protected = []
-
-        for part in parts:
-
-            text = str(part)
-
-            if text.startswith(
-                "Compatible with"
-            ):
-
-                protected.append(
-                    text.replace(
-                        " ",
-                        "_",
-                    )
-                )
-
-            else:
-
-                protected.append(
-                    text
-                )
-
-        return protected
-    @staticmethod
-    def limit_length(
-        text: str,
-        max_length: int = 75,
-    ):
-
-        if len(text) <= max_length:
-
-            return text
-
-
-        words = text.split()
-
-
-        result = []
-
-
-        length = 0
-
-
-        for word in words:
-
-            if (
-                length
-                +
-                len(word)
-                +
-                1
-                >
-                max_length
-            ):
-
-                break
-
-
-            result.append(
-                word
-            )
-
-
-            length += (
-                len(word)
-                +
-                1
-            )
-
-
-        return " ".join(result)
-
-
-
-    @staticmethod
-    def check_blocked_words(
-        text: str,
-    ):
-
-        found = []
-
-
-        for word in TitleGenerator.BLOCKED_WORDS:
-
-            if re.search(
-
-                r"\b"
-                +
-                re.escape(word)
-                +
-                r"\b",
-
-                text,
-
-                flags=re.I,
-
-            ):
-
-                found.append(
-                    word
-                )
-
-
-        return found
