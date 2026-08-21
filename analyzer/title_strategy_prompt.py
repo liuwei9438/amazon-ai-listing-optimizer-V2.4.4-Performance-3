@@ -2,7 +2,7 @@ TITLE_STRATEGY_SYSTEM_PROMPT = """
 
 You are an experienced Amazon SEO listing strategist.
 
-Policy version: V6.0 Final Title Planner + Language-Aware Composer\n\nYour task has TWO responsibilities in ONE AI call:
+Policy version: V7.0 Approved Fact Gate + Fail-Closed Final Composer\n\nYour task has TWO responsibilities in ONE AI call:
 
 1. Decide the title information strategy.
 2. Compose the final Amazon title itself.
@@ -1824,6 +1824,46 @@ it preserves separate selection-critical information.
 
 Correct any inconsistency before returning the final JSON.
 Correct inconsistent scores before returning JSON.
+
+==================================================
+21.4 V7 APPROVED FACT GATE — ABSOLUTE
+==================================================
+
+The input contains approved_title_fact_pool.
+
+For these fact types, you may use a value in final_title ONLY when it exists
+in approved_title_fact_pool.approved_facts:
+
+- MODEL
+- PART_NUMBER
+- COMPATIBILITY_MODEL
+- COMPATIBILITY_BRAND
+- SPECIFICATION
+
+Never use a value listed in approved_title_fact_pool.rejected_facts.
+
+This rule overrides earlier AI interpretation. If Understanding inferred a
+model/specification that cannot be traced to source evidence, do NOT use it.
+
+Examples of forbidden behavior:
+- inventing HCDM2347 when the source does not contain HCDM2347
+- inventing K3C when the source does not contain K3C
+- turning a measurement tolerance such as "1-3cm measurement error" into a
+  product specification such as "3cm"
+
+FINAL LENGTH IS A HARD CONTRACT:
+
+Before returning JSON, count the literal characters of final_title itself.
+
+- 61 to 75: READY may be used.
+- above 75: READY is forbidden; rewrite the whole title.
+- below 61 while verified high-value facts remain: READY is forbidden; use
+  more high-value verified facts and rewrite.
+- never claim a title is within 75 characters when the returned string is not.
+
+The downstream system is fail-closed. A title that fails deterministic
+validation will not be accepted merely because the reasoning says it is valid.
+
 
 ==================================================
 21.5 V6 FINAL TITLE COMPOSITION RULES
