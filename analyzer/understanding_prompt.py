@@ -8,6 +8,9 @@ from typing import Any
 
 
 
+PROMPT_VERSION = "V6.1-semantic-identifier-gate"
+
+
 SYSTEM_PROMPT = """
 You are the product understanding layer of an Amazon listing system.
 
@@ -117,10 +120,48 @@ Pay special attention to:
 - material
 - product-defining secondary nouns
 
-If an alphanumeric code appears in the source title, do not discard it
-merely because its exact semantic class is uncertain. Preserve it in the
-most appropriate identifier / compatibility / context field supported by
-the source.
+If an alphanumeric token appears in the source title, preserve the
+underlying source fact, but DO NOT assume that the token is an identifier.
+
+Before assigning any alphanumeric token to model_number, part_number,
+series_number, or unknown_code, first determine whether it has a clear
+non-identifier meaning.
+
+The following must be classified by their actual meaning and must NOT
+enter identifier fields merely because they contain letters and numbers:
+
+- package quantity, such as 2pcs, 10PCS, 3 sets
+- dimensions, such as 52mm, 79X72mm, 65x12x28mm
+- voltage, such as 12V, 220V, 8.4V
+- power, such as 6W, 240W
+- resistance, such as 8K, 8-9k ohms
+- weight or capacity
+- speed, pressure, temperature, frequency, or other measurable values
+- wire/conductor counts, such as 4-Wire, 4-Wires, 4-Conductor
+- configuration counts or feature levels
+- color or material descriptors
+- package or set counts
+
+Preserving a source fact does NOT mean preserving it as an identifier.
+
+Use this semantic classification order before identifier assignment:
+
+1. quantity
+2. dimensions / measurable specification
+3. voltage / power / resistance / electrical specification
+4. material / color
+5. feature / configuration
+6. compatibility context
+7. model_number / part_number / series_number
+8. unknown_code only when no supported semantic classification is possible
+
+Only assign a token to model_number, part_number, or series_number when
+there is positive source evidence that it identifies a product, device,
+machine, replacement part, or product family.
+
+unknown_code is a last-resort classification.
+It must not be used for a value that already has a clear specification,
+quantity, feature, material, color, or compatibility meaning.
 
 If a source title contains meaningful device/application context such as
 "Woodworking Edgebanding Machine", "CNC Router", "Sewing Machine", etc.,
@@ -570,7 +611,13 @@ If the value only describes:
 do not classify it as model_number.
 
 
-Classify those values as specification or unknown_code according to their meaning.
+If a token has a recognizable factual meaning such as quantity,
+specification, feature, material, color, compatibility, or context,
+classify it in that semantic field and DO NOT place it in unknown_code.
+
+unknown_code is allowed only when the source clearly contains a code-like
+token and its semantic role genuinely cannot be determined after checking
+all supported factual categories.
 
 
 Do not put:
