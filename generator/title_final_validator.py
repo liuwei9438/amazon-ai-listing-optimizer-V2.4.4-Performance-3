@@ -6,7 +6,7 @@ from typing import Any
 class TitleFinalValidator:
     """Stable Title Pipeline V1.0: final deterministic release gate."""
 
-    VERSION = "stable-v1.3-final-validator-approved-cover-aware"
+    VERSION = "stable-v1.4-source-insufficient-aware"
     BLOCKED = {
         "best seller", "#1", "premium", "original", "genuine",
         "official", "authentic", "oem", "wholesale",
@@ -44,8 +44,26 @@ class TitleFinalValidator:
         approved = approved if isinstance(approved, list) else []
 
         errors = []
-        if not (61 <= len(title) <= 75):
-            errors.append("LENGTH_OUTSIDE_61_75")
+
+        composition_status = TitleFinalValidator._clean(
+            composed.get("status")
+        ).upper()
+
+        # 75 is the hard marketplace budget.
+        if len(title) > 75:
+            errors.append("TITLE_ABOVE_75")
+
+        # 61 is a target band, not permission to invent filler.  A title below
+        # 61 is valid only when the deterministic composer has proven that no
+        # additional complete, approved source fact can fit safely.
+        if (
+            len(title) < 61
+            and
+            composition_status
+            !=
+            "SOURCE_FACTS_INSUFFICIENT"
+        ):
+            errors.append("TITLE_BELOW_61_WITH_UNUSED_FACT_CAPACITY")
 
         used_facts = composed.get(
             "used_facts",
